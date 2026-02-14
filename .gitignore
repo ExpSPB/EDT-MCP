@@ -1,8 +1,16 @@
-/mcp/bundles/com.ditrix.edt.mcp.server/target
+# Maven build output
+**/target/
+
+# Temp files
 nulq
 nul
-/source
 log.log
+
+# Build script backup
+*.target.bak
+
+# IDE and tools
 .serena/
 .claude/
-/mcp/repositories/com.ditrix.edt.mcp.server.repository/target
+
+/source
