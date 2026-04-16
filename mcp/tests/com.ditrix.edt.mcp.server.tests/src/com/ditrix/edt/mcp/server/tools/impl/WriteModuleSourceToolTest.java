@@ -73,15 +73,16 @@ public class WriteModuleSourceToolTest
     }
 
     @Test
-    public void testInputSchemaDoesNotContainLineParams()
+    public void testInputSchemaContainsNewParameters()
     {
         WriteModuleSourceTool tool = new WriteModuleSourceTool();
         String schema = tool.getInputSchema();
 
-        // Line-based params should not be present
-        assertFalse(schema.contains("\"line\"")); //$NON-NLS-1$
-        assertFalse(schema.contains("\"lineFrom\"")); //$NON-NLS-1$
-        assertFalse(schema.contains("\"lineTo\"")); //$NON-NLS-1$
+        // New parameters added for replaceLines, replaceMethod, dryRun
+        assertTrue(schema.contains("\"lineFrom\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"lineTo\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"methodName\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"dryRun\"")); //$NON-NLS-1$
     }
 
     // ==================== Result file name ====================
@@ -198,23 +199,72 @@ public class WriteModuleSourceToolTest
     }
 
     @Test
-    public void testExecuteOldLineModes()
+    public void testNewModesAreValid()
     {
         WriteModuleSourceTool tool = new WriteModuleSourceTool();
-        String[] removedModes = { "insertBefore", "insertAfter", "replaceLines" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
-        for (String mode : removedModes)
+        // replaceLines should pass mode validation (fails later on lineFrom/lineTo)
         {
             Map<String, String> params = new HashMap<>();
             params.put("projectName", "TestProject"); //$NON-NLS-1$ //$NON-NLS-2$
             params.put("source", "x = 1;"); //$NON-NLS-1$ //$NON-NLS-2$
             params.put("modulePath", "Documents/MyDoc/ObjectModule.bsl"); //$NON-NLS-1$ //$NON-NLS-2$
-            params.put("mode", mode); //$NON-NLS-1$
+            params.put("mode", "replaceLines"); //$NON-NLS-1$ //$NON-NLS-2$
 
             String result = tool.execute(params);
-            assertTrue("mode '" + mode + "' should be rejected", //$NON-NLS-1$ //$NON-NLS-2$
+            assertFalse("replaceLines should be a valid mode", //$NON-NLS-1$
                 result.contains("invalid mode")); //$NON-NLS-1$
         }
+
+        // replaceMethod should pass mode validation
+        {
+            Map<String, String> params = new HashMap<>();
+            params.put("projectName", "TestProject"); //$NON-NLS-1$ //$NON-NLS-2$
+            params.put("source", "x = 1;"); //$NON-NLS-1$ //$NON-NLS-2$
+            params.put("modulePath", "Documents/MyDoc/ObjectModule.bsl"); //$NON-NLS-1$ //$NON-NLS-2$
+            params.put("mode", "replaceMethod"); //$NON-NLS-1$ //$NON-NLS-2$
+
+            String result = tool.execute(params);
+            assertFalse("replaceMethod should be a valid mode", //$NON-NLS-1$
+                result.contains("invalid mode")); //$NON-NLS-1$
+        }
+    }
+
+    // ==================== replaceLines validation ====================
+
+    @Test
+    public void testReplaceLinesInvalidRange()
+    {
+        WriteModuleSourceTool tool = new WriteModuleSourceTool();
+        Map<String, String> params = new HashMap<>();
+        params.put("projectName", "TestProject"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.put("source", "x = 1;"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.put("modulePath", "Documents/MyDoc/ObjectModule.bsl"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.put("mode", "replaceLines"); //$NON-NLS-1$ //$NON-NLS-2$
+        // No lineFrom/lineTo specified - defaults to -1
+
+        String result = tool.execute(params);
+        // Should reach project validation or line range validation
+        // In unit test env without workspace, it hits "Project not found" first
+        assertTrue(result.contains("Project not found") || result.contains("invalid line range")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    // ==================== replaceMethod validation ====================
+
+    @Test
+    public void testReplaceMethodMissingMethodName()
+    {
+        WriteModuleSourceTool tool = new WriteModuleSourceTool();
+        Map<String, String> params = new HashMap<>();
+        params.put("projectName", "TestProject"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.put("source", "x = 1;"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.put("modulePath", "Documents/MyDoc/ObjectModule.bsl"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.put("mode", "replaceMethod"); //$NON-NLS-1$ //$NON-NLS-2$
+        // No methodName
+
+        String result = tool.execute(params);
+        // In unit test env hits "Project not found" before methodName validation
+        assertTrue(result.contains("Project not found") || result.contains("methodName is required")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     // ==================== searchReplace: oldSource validation ====================

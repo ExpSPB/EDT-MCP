@@ -6,8 +6,11 @@
 
 package com.ditrix.edt.mcp.server.tools.metadata;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 
+import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
@@ -17,9 +20,11 @@ import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicTabularSection;
 import com._1c.g5.v8.dt.metadata.mdclass.CharacteristicsDescription;
+import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.DbObjectAttribute;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.StandardAttribute;
+import com._1c.g5.v8.dt.metadata.mdclass.Subsystem;
 
 /**
  * Universal metadata formatter that can format any MdObject type
@@ -88,7 +93,10 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter
         
         // Format containment collections (attributes, tabular sections, forms, commands, etc.)
         formatContainmentCollections(sb, mdObject, full, language);
-        
+
+        // Format subsystems the object belongs to (if Configuration is accessible)
+        formatSubsystemMembership(sb, mdObject);
+
         return sb.toString();
     }
     
@@ -620,5 +628,80 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter
             }
         }
         return DASH;
+    }
+
+    /**
+     * Formats subsystem membership for the given metadata object.
+     * Walks the subsystem tree to find all subsystems containing this object.
+     */
+    private void formatSubsystemMembership(StringBuilder sb, MdObject mdObject)
+    {
+        try
+        {
+            // Navigate up the EMF containment tree to find Configuration
+            EObject container = mdObject.eContainer();
+            while (container != null && !(container instanceof Configuration))
+            {
+                container = container.eContainer();
+            }
+            if (!(container instanceof Configuration))
+            {
+                return;
+            }
+            Configuration config = (Configuration) container;
+
+            List<String> subsystemPaths = new ArrayList<>();
+            collectSubsystems(config.getSubsystems(), mdObject, "", subsystemPaths); //$NON-NLS-1$
+
+            if (!subsystemPaths.isEmpty())
+            {
+                addSectionHeader(sb, "Subsystems"); //$NON-NLS-1$
+                for (String path : subsystemPaths)
+                {
+                    sb.append("- ").append(path).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                sb.append("\n"); //$NON-NLS-1$
+            }
+        }
+        catch (Exception e)
+        {
+            // Subsystem lookup is non-critical, silently skip on errors
+        }
+    }
+
+    /**
+     * Recursively collects subsystem paths that contain the given object.
+     */
+    private void collectSubsystems(EList<Subsystem> subsystems, MdObject target,
+        String parentPath, List<String> result)
+    {
+        if (subsystems == null)
+        {
+            return;
+        }
+        for (Subsystem subsystem : subsystems)
+        {
+            String path = parentPath.isEmpty()
+                ? subsystem.getName()
+                : parentPath + "." + subsystem.getName(); //$NON-NLS-1$
+
+            // Check if this subsystem contains the target object
+            EList<MdObject> content = subsystem.getContent();
+            if (content != null)
+            {
+                for (MdObject member : content)
+                {
+                    if (member == target || member.getName().equals(target.getName())
+                        && member.eClass().equals(target.eClass()))
+                    {
+                        result.add(path);
+                        break;
+                    }
+                }
+            }
+
+            // Recurse into child subsystems
+            collectSubsystems(subsystem.getSubsystems(), target, path, result);
+        }
     }
 }

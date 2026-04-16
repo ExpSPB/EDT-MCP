@@ -23,6 +23,7 @@ import com._1c.g5.v8.dt.md.refactoring.core.IMdRefactoringService;
 import com._1c.g5.v8.dt.navigator.providers.INavigatorContentProviderStateProvider;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com.ditrix.edt.mcp.server.groups.IGroupService;
+import com.ditrix.edt.mcp.server.session.SessionChangeTracker;
 import com.e1c.g5.dt.applications.IApplicationManager;
 import com.e1c.g5.v8.dt.check.ICheckScheduler;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
@@ -115,6 +116,9 @@ public class Activator extends AbstractUIPlugin
         mdRefactoringServiceTracker = new ServiceTracker<>(context, IMdRefactoringService.class, null);
         mdRefactoringServiceTracker.open();
         
+        // Initialize session change tracker for scoped validation
+        SessionChangeTracker.initialize();
+
         // Create group service directly (not via OSGi DS to avoid circular references)
         groupService = new com.ditrix.edt.mcp.server.groups.internal.GroupServiceImpl();
         ((com.ditrix.edt.mcp.server.groups.internal.GroupServiceImpl) groupService).activate();
@@ -240,6 +244,9 @@ public class Activator extends AbstractUIPlugin
             }
         }
         
+        // Shutdown session change tracker
+        SessionChangeTracker.shutdown();
+
         // Deactivate group service
         if (groupService instanceof com.ditrix.edt.mcp.server.groups.internal.GroupServiceImpl impl)
         {

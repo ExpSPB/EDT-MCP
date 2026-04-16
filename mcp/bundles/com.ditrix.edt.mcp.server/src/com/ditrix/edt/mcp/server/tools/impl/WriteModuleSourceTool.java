@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IFolder;
@@ -40,6 +41,8 @@ public class WriteModuleSourceTool implements IMcpTool
     private static final String MODE_REPLACE = "replace"; //$NON-NLS-1$
     private static final String MODE_APPEND = "append"; //$NON-NLS-1$
     private static final String MODE_SEARCH_REPLACE = "searchReplace"; //$NON-NLS-1$
+    private static final String MODE_REPLACE_LINES = "replaceLines"; //$NON-NLS-1$
+    private static final String MODE_REPLACE_METHOD = "replaceMethod"; //$NON-NLS-1$
 
     /** Maximum source length to prevent accidental huge writes */
     private static final int MAX_SOURCE_LENGTH = 500_000;
@@ -58,11 +61,13 @@ public class WriteModuleSourceTool implements IMcpTool
     {
         return "Write BSL source code to 1C metadata object modules. " + //$NON-NLS-1$
             "Modes: searchReplace (find oldSource and replace with source, default), " + //$NON-NLS-1$
-            "replace (replace entire file), append (add to end). " + //$NON-NLS-1$
+            "replace (replace entire file), append (add to end), " + //$NON-NLS-1$
+            "replaceLines (replace line range), replaceMethod (replace entire method by name). " + //$NON-NLS-1$
             "Specify modulePath or objectName + moduleType. " + //$NON-NLS-1$
             "Automatically checks BSL syntax (balanced Procedure/EndProcedure, " + //$NON-NLS-1$
-            "Function/EndFunction, If/EndIf, etc.) before writing — " + //$NON-NLS-1$
-            "blocks write on errors. Pass skipSyntaxCheck=true to force."; //$NON-NLS-1$
+            "Function/EndFunction, If/EndIf, etc.) before writing - " + //$NON-NLS-1$
+            "blocks write on errors. Pass skipSyntaxCheck=true to force. " + //$NON-NLS-1$
+            "Use dryRun=true to preview changes without writing."; //$NON-NLS-1$
     }
 
     @Override
@@ -95,13 +100,23 @@ public class WriteModuleSourceTool implements IMcpTool
                 "Proves that you have read the current file content.") //$NON-NLS-1$
             .stringProperty("mode", //$NON-NLS-1$
                 "Write mode: 'searchReplace' (find oldSource and replace with source, default), " + //$NON-NLS-1$
-                "'replace' (replace entire file), 'append' (add to end).") //$NON-NLS-1$
+                "'replace' (replace entire file), 'append' (add to end), " + //$NON-NLS-1$
+                "'replaceLines' (replace line range), 'replaceMethod' (replace entire method by name).") //$NON-NLS-1$
             .stringProperty("formName", //$NON-NLS-1$
                 "Form name, required when moduleType=FormModule " + //$NON-NLS-1$
                 "(e.g. 'ItemForm').") //$NON-NLS-1$
             .stringProperty("commandName", //$NON-NLS-1$
                 "Command name, required when moduleType=CommandModule " + //$NON-NLS-1$
                 "(e.g. 'FillByTemplate').") //$NON-NLS-1$
+            .integerProperty("lineFrom", //$NON-NLS-1$
+                "Start line number for replaceLines mode (1-based, inclusive)") //$NON-NLS-1$
+            .integerProperty("lineTo", //$NON-NLS-1$
+                "End line number for replaceLines mode (1-based, inclusive)") //$NON-NLS-1$
+            .stringProperty("methodName", //$NON-NLS-1$
+                "Method name for replaceMethod mode (finds Procedure/Function by name)") //$NON-NLS-1$
+            .booleanProperty("dryRun", //$NON-NLS-1$
+                "Preview changes without writing. Returns diff stats " + //$NON-NLS-1$
+                "(linesBefore, linesAfter, removedLines, addedLines)") //$NON-NLS-1$
             .booleanProperty("skipSyntaxCheck", //$NON-NLS-1$
                 "Skip BSL syntax validation (default: false). " + //$NON-NLS-1$
                 "By default, checks balanced Procedure/EndProcedure, " + //$NON-NLS-1$
@@ -141,6 +156,10 @@ public class WriteModuleSourceTool implements IMcpTool
         String mode = JsonUtils.extractStringArgument(params, "mode"); //$NON-NLS-1$
         String formName = JsonUtils.extractStringArgument(params, "formName"); //$NON-NLS-1$
         String commandName = JsonUtils.extractStringArgument(params, "commandName"); //$NON-NLS-1$
+        int lineFrom = JsonUtils.extractIntArgument(params, "lineFrom", -1); //$NON-NLS-1$
+        int lineTo = JsonUtils.extractIntArgument(params, "lineTo", -1); //$NON-NLS-1$
+        String methodName = JsonUtils.extractStringArgument(params, "methodName"); //$NON-NLS-1$
+        boolean dryRun = JsonUtils.extractBooleanArgument(params, "dryRun", false); //$NON-NLS-1$
         boolean skipSyntaxCheck = JsonUtils.extractBooleanArgument(params, "skipSyntaxCheck", false); //$NON-NLS-1$
 
         // 2. Validate required parameters
@@ -165,10 +184,11 @@ public class WriteModuleSourceTool implements IMcpTool
 
         // Validate mode
         if (!MODE_REPLACE.equals(mode) && !MODE_APPEND.equals(mode)
-            && !MODE_SEARCH_REPLACE.equals(mode))
+            && !MODE_SEARCH_REPLACE.equals(mode)
+            && !MODE_REPLACE_LINES.equals(mode) && !MODE_REPLACE_METHOD.equals(mode))
         {
             return "Error: invalid mode '" + mode + "'. " + //$NON-NLS-1$ //$NON-NLS-2$
-                "Allowed: searchReplace, replace, append"; //$NON-NLS-1$
+                "Allowed: searchReplace, replace, append, replaceLines, replaceMethod"; //$NON-NLS-1$
         }
 
         // Validate oldSource for searchReplace mode
@@ -295,11 +315,144 @@ public class WriteModuleSourceTool implements IMcpTool
                     break;
                 }
 
+                case MODE_REPLACE_LINES:
+                {
+                    if (lineFrom < 1 || lineTo < lineFrom)
+                    {
+                        return "Error: invalid line range: lineFrom=" + lineFrom + //$NON-NLS-1$
+                            ", lineTo=" + lineTo + //$NON-NLS-1$
+                            ". lineFrom must be >= 1 and lineTo must be >= lineFrom"; //$NON-NLS-1$
+                    }
+                    if (lineTo > totalOriginal)
+                    {
+                        return "Error: lineTo (" + lineTo + ") exceeds file length (" + //$NON-NLS-1$ //$NON-NLS-2$
+                            totalOriginal + " lines)"; //$NON-NLS-1$
+                    }
+                    newLines = new ArrayList<>();
+                    // Lines before (0-indexed: 0 to lineFrom-2)
+                    newLines.addAll(originalLines.subList(0, lineFrom - 1));
+                    // New content
+                    newLines.addAll(splitSourceLines(source));
+                    // Lines after (0-indexed: lineTo to end)
+                    if (lineTo < totalOriginal)
+                    {
+                        newLines.addAll(originalLines.subList(lineTo, totalOriginal));
+                    }
+                    break;
+                }
+
+                case MODE_REPLACE_METHOD:
+                {
+                    if (methodName == null || methodName.isEmpty())
+                    {
+                        return "Error: methodName is required for replaceMethod mode"; //$NON-NLS-1$
+                    }
+                    // Find method boundaries
+                    int methodStart = -1;
+                    int methodEnd = -1;
+                    for (int i = 0; i < totalOriginal; i++)
+                    {
+                        Matcher m = BslModuleUtils.METHOD_START_PATTERN.matcher(originalLines.get(i));
+                        if (m.find() && m.group(1).equalsIgnoreCase(methodName))
+                        {
+                            methodStart = i;
+                            // Check for compiler directive on previous line(s)
+                            int directiveStart = methodStart;
+                            for (int k = methodStart - 1; k >= 0; k--)
+                            {
+                                String prevLine = originalLines.get(k).trim();
+                                if (prevLine.startsWith("&") || prevLine.startsWith("#")) //$NON-NLS-1$ //$NON-NLS-2$
+                                {
+                                    directiveStart = k;
+                                }
+                                else if (prevLine.isEmpty())
+                                {
+                                    // Skip empty lines between directive and method
+                                    continue;
+                                }
+                                else
+                                {
+                                    break;
+                                }
+                            }
+                            methodStart = directiveStart;
+                            break;
+                        }
+                    }
+                    if (methodStart < 0)
+                    {
+                        return "Error: method '" + methodName + "' not found in module"; //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    // Find end
+                    for (int i = methodStart + 1; i < totalOriginal; i++)
+                    {
+                        if (BslModuleUtils.METHOD_END_PATTERN.matcher(originalLines.get(i)).find())
+                        {
+                            methodEnd = i;
+                            break;
+                        }
+                    }
+                    if (methodEnd < 0)
+                    {
+                        return "Error: could not find EndProcedure/EndFunction for method '" + //$NON-NLS-1$
+                            methodName + "'"; //$NON-NLS-1$
+                    }
+                    // Build new content
+                    newLines = new ArrayList<>();
+                    newLines.addAll(originalLines.subList(0, methodStart));
+                    newLines.addAll(splitSourceLines(source));
+                    if (methodEnd + 1 < totalOriginal)
+                    {
+                        newLines.addAll(originalLines.subList(methodEnd + 1, totalOriginal));
+                    }
+                    break;
+                }
+
                 default:
                     return "Error: unsupported mode: " + mode; //$NON-NLS-1$
             }
 
-            // 8. BSL syntax check
+            // 8. Protection warning for large removals
+            String protectionWarning = null;
+            if (totalOriginal > 10 && newLines.size() < totalOriginal * 0.7)
+            {
+                protectionWarning = "WARNING: this change removes over 30% of the module (from " //$NON-NLS-1$
+                    + totalOriginal + " to " + newLines.size() + " lines)"; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            // 9. Dry run - preview without writing
+            if (dryRun)
+            {
+                FrontMatter dryFm = FrontMatter.create()
+                    .put("tool", NAME) //$NON-NLS-1$
+                    .put("projectName", projectName) //$NON-NLS-1$
+                    .put("modulePath", modulePath) //$NON-NLS-1$
+                    .put("mode", mode) //$NON-NLS-1$
+                    .put("status", "preview") //$NON-NLS-1$ //$NON-NLS-2$
+                    .put("dryRun", true) //$NON-NLS-1$
+                    .put("linesBefore", totalOriginal) //$NON-NLS-1$
+                    .put("linesAfter", newLines.size()) //$NON-NLS-1$
+                    .put("lineDelta", newLines.size() - totalOriginal); //$NON-NLS-1$
+
+                if (protectionWarning != null)
+                {
+                    dryFm.put("protection", protectionWarning); //$NON-NLS-1$
+                }
+
+                // Show first 50 lines of preview
+                StringBuilder preview = new StringBuilder();
+                preview.append("## Dry Run Preview\n\n"); //$NON-NLS-1$
+                if (protectionWarning != null)
+                {
+                    preview.append("**").append(protectionWarning).append("**\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                preview.append("Lines: ").append(totalOriginal) //$NON-NLS-1$
+                    .append(" -> ").append(newLines.size()).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+
+                return dryFm.wrapContent(preview.toString());
+            }
+
+            // 10. BSL syntax check
             if (!skipSyntaxCheck)
             {
                 BslSyntaxChecker.CheckResult checkResult = BslSyntaxChecker.check(newLines);
@@ -317,10 +470,10 @@ public class WriteModuleSourceTool implements IMcpTool
                 }
             }
 
-            // 9. Write file
+            // 11. Write file
             writeFile(file, newLines, hasBom, fileExists);
 
-            // 10. Build frontmatter
+            // 12. Build frontmatter
             FrontMatter fm = FrontMatter.create()
                 .put("tool", NAME) //$NON-NLS-1$
                 .put("projectName", projectName) //$NON-NLS-1$
@@ -339,8 +492,18 @@ public class WriteModuleSourceTool implements IMcpTool
                 fm.put("newFile", true); //$NON-NLS-1$
             }
 
-            // 11. Return success
-            return fm.wrapContent("File written successfully"); //$NON-NLS-1$
+            if (protectionWarning != null)
+            {
+                fm.put("protection", protectionWarning); //$NON-NLS-1$
+            }
+
+            // 13. Return success
+            StringBuilder successMsg = new StringBuilder("File written successfully"); //$NON-NLS-1$
+            if (protectionWarning != null)
+            {
+                successMsg.append("\n\n**").append(protectionWarning).append("**"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            return fm.wrapContent(successMsg.toString());
         }
         catch (Exception e)
         {

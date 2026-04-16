@@ -69,7 +69,10 @@ import com.ditrix.edt.mcp.server.tools.impl.DebugStatusTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetProfilingResultsTool;
 import com.ditrix.edt.mcp.server.tools.impl.DebugYaxunitTestsTool;
 import com.ditrix.edt.mcp.server.tools.impl.DeleteMetadataObjectTool;
+import com.ditrix.edt.mcp.server.tools.impl.DiffModuleTool;
+import com.ditrix.edt.mcp.server.tools.impl.EditFormTool;
 import com.ditrix.edt.mcp.server.tools.impl.AddMetadataAttributeTool;
+import com.ditrix.edt.mcp.server.tools.impl.AiContextTool;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -240,11 +243,16 @@ public class McpServer
         registry.register(new GetSymbolInfoTool());
         registry.register(new GetFormScreenshotTool());
         registry.register(new ValidateQueryTool());
+        registry.register(new DiffModuleTool());
+        registry.register(new AiContextTool());
 
         // Metadata refactoring tools
         registry.register(new RenameMetadataObjectTool());
         registry.register(new DeleteMetadataObjectTool());
         registry.register(new AddMetadataAttributeTool());
+
+        // Form editing tools
+        registry.register(new EditFormTool());
 
         Activator.logInfo("Registered " + registry.getToolCount() + " MCP tools"); //$NON-NLS-1$ //$NON-NLS-2$
     }
