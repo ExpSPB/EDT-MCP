@@ -67,7 +67,12 @@ public class EditFormTool implements IMcpTool
             .stringProperty("projectName", //$NON-NLS-1$
                 "EDT project name (required)", true) //$NON-NLS-1$
             .stringProperty("formFqn", //$NON-NLS-1$
-                "Form FQN, e.g. 'Catalog.Products.Form.ItemForm' (required)", true) //$NON-NLS-1$
+                "BM top-object FQN of the form, ending with '.Form' " //$NON-NLS-1$
+                + "(the Form.form file segment). " //$NON-NLS-1$
+                + "Example: 'Catalog.Products.Form.ItemForm.Form'. " //$NON-NLS-1$
+                + "On error the tool lists matching FQNs from the BM namespace " //$NON-NLS-1$
+                + "(borrowed forms in extensions may use a different prefix). " //$NON-NLS-1$
+                + "Required.", true) //$NON-NLS-1$
             .stringProperty("operation", //$NON-NLS-1$
                 "Operation: addField, addGroup, addButton, addTable, addDecoration, " + //$NON-NLS-1$
                 "removeItem, help (required)", true) //$NON-NLS-1$
@@ -115,7 +120,8 @@ public class EditFormTool implements IMcpTool
         if (formFqn == null || formFqn.isEmpty())
         {
             return buildError("formFqn is required. " + //$NON-NLS-1$
-                "Example: 'Catalog.Products.Form.ItemForm'"); //$NON-NLS-1$
+                "Example: 'Catalog.Products.Form.ItemForm.Form' " + //$NON-NLS-1$
+                "(note the trailing '.Form' segment from the Form.form file)"); //$NON-NLS-1$
         }
         if (operation == null || operation.isEmpty())
         {
@@ -494,6 +500,19 @@ public class EditFormTool implements IMcpTool
     {
         StringBuilder sb = new StringBuilder();
         sb.append("# edit_form - Form Element Operations\n\n"); //$NON-NLS-1$
+
+        sb.append("## Common Parameters\n\n"); //$NON-NLS-1$
+        sb.append("- **projectName** (required): EDT project name " //$NON-NLS-1$
+            + "(for borrowed forms use the extension project name).\n"); //$NON-NLS-1$
+        sb.append("- **formFqn** (required): BM top-object FQN of the form. " //$NON-NLS-1$
+            + "Must end with '.Form' - this segment comes from the Form.form " //$NON-NLS-1$
+            + "file name.\n"); //$NON-NLS-1$
+        sb.append("  - Main config: `Catalog.Products.Form.ItemForm.Form`\n"); //$NON-NLS-1$
+        sb.append("  - Common form: `CommonForm.MyForm.Form`\n"); //$NON-NLS-1$
+        sb.append("  - If the FQN is not found, the error lists matching " //$NON-NLS-1$
+            + "FQNs from the BM namespace (useful for borrowed forms where the " //$NON-NLS-1$
+            + "canonical FQN may differ from the main configuration).\n\n"); //$NON-NLS-1$
+
         sb.append("## Operations\n\n"); //$NON-NLS-1$
 
         sb.append("### addField\n"); //$NON-NLS-1$
@@ -545,7 +564,7 @@ public class EditFormTool implements IMcpTool
         sb.append("// Add an input field bound to Object.Price\n"); //$NON-NLS-1$
         sb.append("{\n"); //$NON-NLS-1$
         sb.append("  \"projectName\": \"MyConfig\",\n"); //$NON-NLS-1$
-        sb.append("  \"formFqn\": \"Catalog.Products.Form.ItemForm\",\n"); //$NON-NLS-1$
+        sb.append("  \"formFqn\": \"Catalog.Products.Form.ItemForm.Form\",\n"); //$NON-NLS-1$
         sb.append("  \"operation\": \"addField\",\n"); //$NON-NLS-1$
         sb.append("  \"name\": \"FieldPrice\",\n"); //$NON-NLS-1$
         sb.append("  \"title\": \"Price\",\n"); //$NON-NLS-1$

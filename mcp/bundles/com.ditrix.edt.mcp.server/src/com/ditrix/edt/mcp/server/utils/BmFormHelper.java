@@ -149,7 +149,11 @@ public class BmFormHelper
      * </ol>
      *
      * @param project the workspace project
-     * @param formFqn the form FQN (e.g. "Catalog.Products.Form.ItemForm")
+     * @param formFqn the BM top-object FQN of the form, including the trailing
+     *            {@code .Form} segment that comes from the {@code Form.form}
+     *            file name (e.g. "Catalog.Products.Form.ItemForm.Form"). Use
+     *            the diagnostic hint returned on "form not found" to discover
+     *            the canonical FQN for borrowed forms in extensions.
      * @param action the action to execute inside the transaction
      * @return result string from the action, or an error message
      */
