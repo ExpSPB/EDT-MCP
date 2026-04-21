@@ -8,6 +8,9 @@ package com.ditrix.edt.mcp.server.utils;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 
 import org.eclipse.core.resources.IProject;
 
@@ -182,7 +185,8 @@ public class BmFormHelper
                             .invoke(transaction, formFqn);
                         if (form == null)
                         {
-                            return "Error: Form not found by FQN: " + formFqn; //$NON-NLS-1$
+                            return "Error: Form not found by FQN: " + formFqn //$NON-NLS-1$
+                                + suggestSimilarFqns(transaction, formFqn);
                         }
 
                         return action.execute(transaction, form);
@@ -926,6 +930,75 @@ public class BmFormHelper
         catch (Exception e)
         {
             // Non-fatal - representation is optional
+        }
+    }
+
+    /**
+     * Builds a diagnostic suffix listing BM top-object FQNs that contain the
+     * object name or form name from the requested FQN. Helps the caller discover
+     * the actual FQN used by the BM namespace (e.g. for borrowed forms in
+     * extensions where the FQN format may differ from the main configuration).
+     */
+    private String suggestSimilarFqns(Object transaction, String requestedFqn)
+    {
+        try
+        {
+            String[] parts = requestedFqn.split("\\."); //$NON-NLS-1$
+            String objectName = parts.length >= 2 ? parts[1] : null;
+            String formName = parts.length >= 1 ? parts[parts.length - 1] : null;
+
+            @SuppressWarnings("unchecked")
+            Iterator<Object> iter = (Iterator<Object>) txIface.getMethod("getTopObjectIterator") //$NON-NLS-1$
+                .invoke(transaction);
+
+            List<String> objectMatches = new ArrayList<>();
+            List<String> formMatches = new ArrayList<>();
+            int scanned = 0;
+            while (iter.hasNext() && objectMatches.size() + formMatches.size() < 30)
+            {
+                Object obj = iter.next();
+                scanned++;
+                String fqn = (String) obj.getClass().getMethod("bmGetFqn").invoke(obj); //$NON-NLS-1$
+                if (fqn == null)
+                {
+                    continue;
+                }
+                if (objectName != null && fqn.contains(objectName) && objectMatches.size() < 15)
+                {
+                    objectMatches.add(fqn);
+                }
+                else if (formName != null && fqn.contains(formName) && formMatches.size() < 15)
+                {
+                    formMatches.add(fqn);
+                }
+            }
+
+            StringBuilder hint = new StringBuilder();
+            if (!objectMatches.isEmpty())
+            {
+                hint.append("\n\nTop-objects containing '").append(objectName).append("':\n"); //$NON-NLS-1$ //$NON-NLS-2$
+                for (String fqn : objectMatches)
+                {
+                    hint.append("  - ").append(fqn).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            if (!formMatches.isEmpty())
+            {
+                hint.append("\n\nTop-objects containing '").append(formName).append("':\n"); //$NON-NLS-1$ //$NON-NLS-2$
+                for (String fqn : formMatches)
+                {
+                    hint.append("  - ").append(fqn).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            if (hint.length() == 0)
+            {
+                hint.append("\n\nNo matching top-objects found (scanned ").append(scanned).append(")."); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            return hint.toString();
+        }
+        catch (Exception e)
+        {
+            return "\n\n(diagnostic scan failed: " + e.getMessage() + ")"; //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
