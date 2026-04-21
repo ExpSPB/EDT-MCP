@@ -190,19 +190,21 @@ public class BmFormHelper
                     return null;
                 });
 
-            // Find executeReadWriteTask method via reflection scan
-            Method executeMethod = findExecuteMethod(bmModel, "executeReadWriteTask", IProject.class); //$NON-NLS-1$
+            // executeReadWriteTask lives on IBmModelManager (com._1c.g5.v8.dt.core.platform),
+            // not on IBmModel (com._1c.g5.v8.bm.integration). The overload we want:
+            // executeReadWriteTask(IProject, IBmSingleNamespaceTask<T>)
+            Method executeMethod = findExecuteMethod(bmModelManager, "executeReadWriteTask", IProject.class); //$NON-NLS-1$
             if (executeMethod == null)
             {
                 // Fallback: try with generic parameter types
-                executeMethod = findExecuteMethod(bmModel, "executeReadWriteTask", null); //$NON-NLS-1$
+                executeMethod = findExecuteMethod(bmModelManager, "executeReadWriteTask", null); //$NON-NLS-1$
             }
             if (executeMethod == null)
             {
-                return "Error: Cannot find executeReadWriteTask method on IBmModel"; //$NON-NLS-1$
+                return "Error: Cannot find executeReadWriteTask method on IBmModelManager"; //$NON-NLS-1$
             }
 
-            Object result = executeMethod.invoke(bmModel, project, taskProxy);
+            Object result = executeMethod.invoke(bmModelManager, project, taskProxy);
 
             if (result instanceof String)
             {
