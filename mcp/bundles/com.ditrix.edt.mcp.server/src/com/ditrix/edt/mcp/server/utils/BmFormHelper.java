@@ -219,6 +219,11 @@ public class BmFormHelper
                 return (String) result;
             }
 
+            // Persist BM changes to disk: forceExport(IDtProject, formFqn).
+            // Without this step changes remain in the BM in-memory namespace
+            // and the Form.form file on disk is never updated.
+            persistFormChanges(bmModelManager, project, formFqn);
+
             return null; // Success, no error
         }
         catch (Exception e)
@@ -714,6 +719,49 @@ public class BmFormHelper
     }
 
     /**
+     * Resets the ID counter considering both the form and its BaseForm.
+     * Borrowed forms in extensions only expose override items via
+     * {@code getItems()}, so scanning the BaseForm top-object is required
+     * to pick up IDs inherited from the main configuration.
+     *
+     * @param form the form object
+     * @param baseForm the BaseForm top-object, or {@code null} if not applicable
+     * @throws Exception if scanning fails
+     */
+    public void resetIdCounter(Object form, Object baseForm) throws Exception
+    {
+        int max = findMaxId(form);
+        if (baseForm != null)
+        {
+            int baseMax = findMaxId(baseForm);
+            if (baseMax > max)
+            {
+                max = baseMax;
+            }
+        }
+        idCounter = max;
+    }
+
+    /**
+     * Resolves the BaseForm top-object for a borrowed form in an extension.
+     * <p>
+     * For a form FQN like {@code "Document.X.Form.Y.Form"}, the BaseForm (if
+     * any) is a separate top-object with FQN {@code "Document.X.Form.Y.Form.BaseForm"}.
+     * Returns {@code null} for forms in the main configuration or when no
+     * BaseForm exists.
+     *
+     * @param transaction the active BM transaction
+     * @param formFqn the main form FQN (including trailing {@code .Form})
+     * @return the BaseForm object, or {@code null} if it does not exist
+     * @throws Exception if the lookup fails
+     */
+    public Object findBaseForm(Object transaction, String formFqn) throws Exception
+    {
+        return txIface.getMethod("getTopObjectByFqn", String.class) //$NON-NLS-1$
+            .invoke(transaction, formFqn + ".BaseForm"); //$NON-NLS-1$
+    }
+
+    /**
      * Returns the next available ID and increments the counter.
      *
      * @return next ID
@@ -934,6 +982,44 @@ public class BmFormHelper
         catch (Exception e)
         {
             // Non-fatal - representation is optional
+        }
+    }
+
+    /**
+     * Forces the BM namespace to export the given top-object to its backing
+     * file. Without this step, changes committed inside a BM transaction stay
+     * in the in-memory namespace and the {@code .form} file is never updated.
+     * <p>
+     * Uses {@code IBmModelManager.forceExport(IDtProject, String)} via
+     * reflection (IDtProject is not a compile-time dependency). Falls back to
+     * {@code waitModelSynchronization(IProject)} if forceExport is
+     * unavailable. Both failures are non-fatal and logged as warnings.
+     */
+    private void persistFormChanges(IBmModelManager bmModelManager, IProject project, String formFqn)
+    {
+        try
+        {
+            Method getDtProject = bmModelManager.getClass().getMethod("getDtProject", String.class); //$NON-NLS-1$
+            Object dtProject = getDtProject.invoke(bmModelManager, project.getName());
+            if (dtProject != null)
+            {
+                Method forceExport = bmModelManager.getClass().getMethod("forceExport", dtProjectIface, String.class); //$NON-NLS-1$
+                forceExport.invoke(bmModelManager, dtProject, formFqn);
+                return;
+            }
+        }
+        catch (Exception e)
+        {
+            Activator.logWarning("forceExport failed, trying waitModelSynchronization: " + e.getMessage()); //$NON-NLS-1$
+        }
+        try
+        {
+            Method waitSync = bmModelManager.getClass().getMethod("waitModelSynchronization", IProject.class); //$NON-NLS-1$
+            waitSync.invoke(bmModelManager, project);
+        }
+        catch (Exception e)
+        {
+            Activator.logWarning("waitModelSynchronization also failed: " + e.getMessage()); //$NON-NLS-1$
         }
     }
 

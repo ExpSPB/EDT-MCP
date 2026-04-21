@@ -187,7 +187,10 @@ public class EditFormTool implements IMcpTool
         // Execute inside BM transaction
         String error = helper.executeFormOperation(project, formFqn, (tx, form) ->
         {
-            helper.resetIdCounter(form);
+            // Include BaseForm (if any) in the ID scan so that new IDs do not
+            // collide with those inherited from the main configuration form.
+            Object baseForm = helper.findBaseForm(tx, formFqn);
+            helper.resetIdCounter(form, baseForm);
 
             switch (operation.toLowerCase())
             {
@@ -512,6 +515,23 @@ public class EditFormTool implements IMcpTool
         sb.append("  - If the FQN is not found, the error lists matching " //$NON-NLS-1$
             + "FQNs from the BM namespace (useful for borrowed forms where the " //$NON-NLS-1$
             + "canonical FQN may differ from the main configuration).\n\n"); //$NON-NLS-1$
+
+        sb.append("## Preconditions\n\n"); //$NON-NLS-1$
+        sb.append("- **Fields with dataPath**: the backing attribute must " //$NON-NLS-1$
+            + "already exist on the metadata object. If you are binding to a " //$NON-NLS-1$
+            + "new attribute, call `add_metadata_attribute` first - otherwise " //$NON-NLS-1$
+            + "EDT will flag the dataPath as `form-data-path` MAJOR error.\n"); //$NON-NLS-1$
+        sb.append("- **Extension attributes**: EDT prefixes attributes added " //$NON-NLS-1$
+            + "in extensions with the extension's `namePrefix` (e.g. adding " //$NON-NLS-1$
+            + "attribute `Price` in extension with prefix `Ais_` results in " //$NON-NLS-1$
+            + "`Ais_Price`). Use the prefixed name in dataPath: " //$NON-NLS-1$
+            + "`Object.Ais_Price`.\n"); //$NON-NLS-1$
+        sb.append("- **BaseForm awareness**: borrowed forms only expose " //$NON-NLS-1$
+            + "override items via `getItems()`; the tool automatically scans " //$NON-NLS-1$
+            + "the `.BaseForm` top-object for ID collision avoidance.\n"); //$NON-NLS-1$
+        sb.append("- **Persistence**: changes are written to the `.form` " //$NON-NLS-1$
+            + "file via `forceExport` after each operation - no separate save " //$NON-NLS-1$
+            + "step is required.\n\n"); //$NON-NLS-1$
 
         sb.append("## Operations\n\n"); //$NON-NLS-1$
 
