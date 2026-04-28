@@ -81,10 +81,14 @@ import com.ditrix.edt.mcp.server.tools.impl.DiffModuleTool;
 import com.ditrix.edt.mcp.server.tools.impl.EditFormTool;
 import com.ditrix.edt.mcp.server.tools.impl.AddMetadataAttributeTool;
 import com.ditrix.edt.mcp.server.tools.impl.AiContextTool;
+import com.ditrix.edt.mcp.server.tools.impl.AuditRoleRightsTool;
 import com.ditrix.edt.mcp.server.tools.impl.CompareConfigurationsTool;
 import com.ditrix.edt.mcp.server.tools.impl.DependencyGraphTool;
 import com.ditrix.edt.mcp.server.tools.impl.DetectQueryAntiPatternsTool;
+import com.ditrix.edt.mcp.server.tools.impl.FindRlsViolationsTool;
+import com.ditrix.edt.mcp.server.tools.impl.GenerateEventHandlersTool;
 import com.ditrix.edt.mcp.server.tools.impl.ProjectMetricsTool;
+import com.ditrix.edt.mcp.server.tools.impl.SensitiveDataScanTool;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -280,6 +284,12 @@ public class McpServer
         registry.register(new DetectQueryAntiPatternsTool());
         registry.register(new ProjectMetricsTool());
         registry.register(new CompareConfigurationsTool());
+
+        // 1.39 security pack + developer experience
+        registry.register(new AuditRoleRightsTool());
+        registry.register(new FindRlsViolationsTool());
+        registry.register(new SensitiveDataScanTool());
+        registry.register(new GenerateEventHandlersTool());
 
         Activator.logInfo("Registered " + registry.getToolCount() + " MCP tools"); //$NON-NLS-1$ //$NON-NLS-2$
     }

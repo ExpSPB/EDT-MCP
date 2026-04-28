@@ -78,6 +78,12 @@ public class ValidateQueryTool implements IMcpTool
             .booleanProperty("dcsMode", //$NON-NLS-1$
                 "DCS (Data Composition System) mode. Set to true for queries used in " + //$NON-NLS-1$
                 "data composition schemas. Allows additional DCS-specific syntax. Default: false") //$NON-NLS-1$
+            .booleanProperty("fix", //$NON-NLS-1$
+                "Auto-fix obvious syntax errors (1.39): keyword typos (ВЫБРАТ -> ВЫБРАТЬ), " //$NON-NLS-1$
+                    + "empty trailing WHERE removal. Conservative — never changes semantics. " //$NON-NLS-1$
+                    + "Returns fixedQuery in response. Default: false.") //$NON-NLS-1$
+            .booleanProperty("fixedOnly", //$NON-NLS-1$
+                "When fix=true, return only the fixed query text without diagnostics. Default: false.") //$NON-NLS-1$
             .build();
     }
     
@@ -93,17 +99,19 @@ public class ValidateQueryTool implements IMcpTool
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String queryText = JsonUtils.extractStringArgument(params, "queryText"); //$NON-NLS-1$
         boolean dcsMode = JsonUtils.extractBooleanArgument(params, "dcsMode", false); //$NON-NLS-1$
-        
+        boolean fix = JsonUtils.extractBooleanArgument(params, "fix", false); //$NON-NLS-1$
+        boolean fixedOnly = JsonUtils.extractBooleanArgument(params, "fixedOnly", false); //$NON-NLS-1$
+
         if (projectName == null || projectName.isEmpty())
         {
             return ToolResult.error("projectName is required").toJson(); //$NON-NLS-1$
         }
-        
+
         if (queryText == null || queryText.isEmpty())
         {
             return ToolResult.error("queryText is required").toJson(); //$NON-NLS-1$
         }
-        
+
         // Find the project
         IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
         if (project == null || !project.exists())
@@ -114,8 +122,108 @@ public class ValidateQueryTool implements IMcpTool
         {
             return ToolResult.error("Project is closed: " + projectName).toJson(); //$NON-NLS-1$
         }
-        
+
+        // 1.39: when fix=true apply conservative auto-fixes BEFORE validation
+        if (fix)
+        {
+            QueryFixResult fixResult = applyConservativeFixes(queryText);
+            if (fixedOnly)
+            {
+                return ToolResult.success()
+                    .put("fix", true) //$NON-NLS-1$
+                    .put("fixedQuery", fixResult.fixedQuery) //$NON-NLS-1$
+                    .put("fixesApplied", fixResult.fixesApplied) //$NON-NLS-1$
+                    .toJson();
+            }
+            // Validate the fixed query and combine
+            String validation = validateQuery(project, fixResult.fixedQuery, dcsMode);
+            try
+            {
+                com.google.gson.JsonObject obj = com.google.gson.JsonParser.parseString(validation)
+                    .getAsJsonObject();
+                obj.addProperty("fix", true); //$NON-NLS-1$
+                obj.addProperty("fixedQuery", fixResult.fixedQuery); //$NON-NLS-1$
+                obj.addProperty("originalQuery", queryText); //$NON-NLS-1$
+                com.google.gson.JsonArray applied = new com.google.gson.JsonArray();
+                for (Map<String, String> entry : fixResult.fixesApplied)
+                {
+                    com.google.gson.JsonObject e = new com.google.gson.JsonObject();
+                    for (Map.Entry<String, String> kv : entry.entrySet())
+                    {
+                        e.addProperty(kv.getKey(), kv.getValue());
+                    }
+                    applied.add(e);
+                }
+                obj.add("fixesApplied", applied); //$NON-NLS-1$
+                obj.addProperty("fixable", !fixResult.fixesApplied.isEmpty()); //$NON-NLS-1$
+                return obj.toString();
+            }
+            catch (Exception e)
+            {
+                return validation;
+            }
+        }
+
         return validateQuery(project, queryText, dcsMode);
+    }
+
+    /**
+     * Container for fix results.
+     */
+    private static class QueryFixResult
+    {
+        String fixedQuery;
+        List<Map<String, String>> fixesApplied = new ArrayList<>();
+    }
+
+    /**
+     * Conservative auto-fix transformers. Each must NEVER change semantics.
+     * Returns the (possibly fixed) query plus a list of applied fixes.
+     */
+    private static QueryFixResult applyConservativeFixes(String queryText)
+    {
+        QueryFixResult result = new QueryFixResult();
+        String current = queryText;
+        // 1) Keyword typo fixes - exact-match replacement of common typos
+        Map<String, String> typos = new java.util.LinkedHashMap<>();
+        typos.put("ВЫБРАТ ", "ВЫБРАТЬ "); //$NON-NLS-1$ //$NON-NLS-2$
+        typos.put("ВЫБРОТЬ ", "ВЫБРАТЬ "); //$NON-NLS-1$ //$NON-NLS-2$
+        typos.put("ГЬДЕ ", "ГДЕ "); //$NON-NLS-1$ //$NON-NLS-2$
+        typos.put("ГДЕЕ ", "ГДЕ "); //$NON-NLS-1$ //$NON-NLS-2$
+        typos.put("СОЕДЕНИ", "СОЕДИНЕНИ"); //$NON-NLS-1$ //$NON-NLS-2$
+        typos.put("ЛЕВО СОЕД", "ЛЕВОЕ СОЕД"); //$NON-NLS-1$ //$NON-NLS-2$
+        typos.put("ОБЪЕДИНИ ", "ОБЪЕДИНИТЬ "); //$NON-NLS-1$ //$NON-NLS-2$
+        typos.put("ИСТЬ ", "ЕСТЬ "); //$NON-NLS-1$ //$NON-NLS-2$
+        typos.put("УПОРЯДОЧИТ ", "УПОРЯДОЧИТЬ "); //$NON-NLS-1$ //$NON-NLS-2$
+        typos.put("СГРУПИРОВАТЬ", "СГРУППИРОВАТЬ"); //$NON-NLS-1$ //$NON-NLS-2$
+        typos.put("ИМЕЮЩИИ ", "ИМЕЮЩИЕ "); //$NON-NLS-1$ //$NON-NLS-2$
+        for (Map.Entry<String, String> entry : typos.entrySet())
+        {
+            if (current.contains(entry.getKey()))
+            {
+                current = current.replace(entry.getKey(), entry.getValue());
+                Map<String, String> fix = new java.util.LinkedHashMap<>();
+                fix.put("rule", "TYPO_KEYWORD"); //$NON-NLS-1$ //$NON-NLS-2$
+                fix.put("from", entry.getKey().trim()); //$NON-NLS-1$
+                fix.put("to", entry.getValue().trim()); //$NON-NLS-1$
+                result.fixesApplied.add(fix);
+            }
+        }
+        // 2) Empty trailing WHERE - "ВЫБРАТЬ ... ИЗ X ГДЕ" with nothing after WHERE
+        java.util.regex.Pattern emptyWhere = java.util.regex.Pattern
+            .compile("(\\bГДЕ\\s*$|\\bWHERE\\s*$)", //$NON-NLS-1$
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        java.util.regex.Matcher mEmpty = emptyWhere.matcher(current.trim());
+        if (mEmpty.find())
+        {
+            current = current.substring(0, current.length() - mEmpty.group().length()).trim();
+            Map<String, String> fix = new java.util.LinkedHashMap<>();
+            fix.put("rule", "EMPTY_WHERE"); //$NON-NLS-1$ //$NON-NLS-2$
+            fix.put("description", "Removed empty trailing WHERE/ГДЕ"); //$NON-NLS-1$ //$NON-NLS-2$
+            result.fixesApplied.add(fix);
+        }
+        result.fixedQuery = current;
+        return result;
     }
     
     /**
