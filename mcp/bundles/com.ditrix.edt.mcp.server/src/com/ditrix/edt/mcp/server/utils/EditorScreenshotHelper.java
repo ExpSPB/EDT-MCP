@@ -6,7 +6,9 @@ package com.ditrix.edt.mcp.server.utils;
 import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
@@ -47,6 +49,23 @@ public final class EditorScreenshotHelper
     private static final String REFRESH_METHOD = "refresh"; //$NON-NLS-1$
     private static final int WYSIWYG_WAIT_RETRIES = 15;
     private static final int WYSIWYG_WAIT_INTERVAL_MS = 500;
+
+    // Form model classes (loaded via reflection for activatePageInForm)
+    private static final String FORM_CLASS = "com._1c.g5.v8.dt.form.model.Form"; //$NON-NLS-1$
+    private static final String FORM_GROUP_CLASS = "com._1c.g5.v8.dt.form.model.FormGroup"; //$NON-NLS-1$
+    private static final String FORM_ITEM_CONTAINER_CLASS = "com._1c.g5.v8.dt.form.model.FormItemContainer"; //$NON-NLS-1$
+    private static final String NAMED_ELEMENT_CLASS = "com._1c.g5.v8.dt.mcore.NamedElement"; //$NON-NLS-1$
+    private static final String PAGE_GROUP_EXT_INFO_CLASS = "com._1c.g5.v8.dt.form.model.PageGroupExtInfo"; //$NON-NLS-1$
+
+    // WYSIWYG render classes accessed by simple name to avoid x-internal package imports
+    private static final String TAB_CONTROL_SIMPLE_NAME = "TabControl"; //$NON-NLS-1$
+    /** Substring expected in FQN of EDT's TabControl - guards against accidental simple name collisions. */
+    private static final String TAB_CONTROL_PACKAGE_HINT = "com._1c.g5.v8.dt.form."; //$NON-NLS-1$
+    private static final String OPEN_TAB_METHOD = "openTab"; //$NON-NLS-1$
+    private static final String GET_RELATED_CONTROL_METHOD = "getRelatedControl"; //$NON-NLS-1$
+    private static final String GET_PARENT_METHOD = "getParent"; //$NON-NLS-1$
+    private static final int CONTROL_LOOKUP_RETRIES = 5;
+    private static final int CONTROL_LOOKUP_INTERVAL_MS = 200;
 
     private EditorScreenshotHelper()
     {
@@ -429,6 +448,426 @@ public final class EditorScreenshotHelper
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         loader.save(output, SWT.IMAGE_PNG);
         return Base64.getEncoder().encodeToString(output.toByteArray());
+    }
+
+    // ==================== Form page activation ====================
+
+    /**
+     * Activates a Page form element (FormGroup with PageGroupExtInfo) inside a Pages
+     * container so that the WYSIWYG render shows it before the screenshot is taken.
+     * <p>
+     * Search is recursive across the whole form by element name. If multiple Page
+     * elements share a name, the first one encountered (depth-first) is used.
+     * <p>
+     * Must be called on the UI thread, after the form editor is opened and its
+     * WYSIWYG page has become available.
+     *
+     * @param editorPage the active FormEditorPage instance
+     * @param pageName the name of the Page form element to activate
+     * @return {@code null} on success, an error JSON string on failure
+     */
+    public static String activatePageInForm(Object editorPage, String pageName)
+    {
+        if (pageName == null || pageName.isEmpty())
+        {
+            return null;
+        }
+        try
+        {
+            Object viewer = ReflectionUtils.getFieldValue(editorPage, WYSIWYG_VIEWER_FIELD);
+            if (viewer == null)
+            {
+                return ToolResult.error("WYSIWYG viewer not available for page activation").toJson(); //$NON-NLS-1$
+            }
+            Object representation = ReflectionUtils.getFieldValue(viewer, WYSIWYG_REPRESENTATION_FIELD);
+            if (representation == null)
+            {
+                return ToolResult
+                    .error("WYSIWYG representation not available for page activation").toJson(); //$NON-NLS-1$
+            }
+
+            Object form = resolveFormObject(editorPage, viewer, representation);
+            if (form == null)
+            {
+                Activator.logWarning("Cannot resolve Form EMF model. Tried fields/methods on " //$NON-NLS-1$
+                    + "representation/viewer/editor - none returned a Form instance. EDT API may have changed."); //$NON-NLS-1$
+                return ToolResult.error("Cannot resolve Form model from editor for page activation").toJson(); //$NON-NLS-1$
+            }
+
+            Class<?> containerIface = Class.forName(FORM_ITEM_CONTAINER_CLASS);
+            Class<?> namedIface = Class.forName(NAMED_ELEMENT_CLASS);
+            Object pageItem = findFormItemByName(form, pageName, containerIface, namedIface);
+            if (pageItem == null)
+            {
+                List<String> available = collectPageNames(form);
+                String hint = available.isEmpty()
+                    ? "form has no Page elements" //$NON-NLS-1$
+                    : "available pages: " + available; //$NON-NLS-1$
+                return ToolResult
+                    .error("Page '" + pageName + "' not found in form (" + hint + ")").toJson(); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+
+            Object control = lookupRelatedControl(representation, pageItem);
+            if (control == null)
+            {
+                return ToolResult
+                    .error("Page '" + pageName + "' is not rendered in WYSIWYG yet (control not found)") //$NON-NLS-1$ //$NON-NLS-2$
+                    .toJson();
+            }
+
+            Object tabControl = findAncestorByClassSimpleName(control, TAB_CONTROL_SIMPLE_NAME, TAB_CONTROL_PACKAGE_HINT);
+            if (tabControl == null)
+            {
+                return ToolResult.error(
+                    "TabControl ancestor not found for page '" + pageName //$NON-NLS-1$
+                        + "' (page may not be inside a Pages group)").toJson(); //$NON-NLS-1$
+            }
+
+            Method openTabMethod = findCompatibleMethod(representation.getClass(), OPEN_TAB_METHOD, tabControl);
+            if (openTabMethod == null)
+            {
+                return ToolResult.error("openTab method not found on " //$NON-NLS-1$
+                    + representation.getClass().getSimpleName()).toJson();
+            }
+            openTabMethod.setAccessible(true);
+            openTabMethod.invoke(representation, tabControl);
+
+            Display display = Display.getCurrent();
+            for (int i = 0; i < 3; i++)
+            {
+                processEvents(display);
+                sleep(100);
+            }
+            return null;
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Failed to activate page '" + pageName + "' in form", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return ToolResult
+                .error("Failed to activate page '" + pageName + "': " + e.getMessage()).toJson(); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Resolves the {@code Form} EMF object reachable from the editor / viewer / representation.
+     * Tries common field and method names, then scans for any field whose value is an instance of {@code Form}.
+     */
+    private static Object resolveFormObject(Object editorPage, Object viewer, Object representation)
+    {
+        Class<?> formIface;
+        try
+        {
+            formIface = Class.forName(FORM_CLASS);
+        }
+        catch (ClassNotFoundException e)
+        {
+            return null;
+        }
+
+        String[] candidateFields = { "form", "formModel", "model", "rootForm" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        String[] candidateMethods = { "getForm", "getModel", "getRootForm" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+        Object editor = null;
+        try
+        {
+            editor = editorPage.getClass().getMethod("getEditor").invoke(editorPage); //$NON-NLS-1$
+        }
+        catch (Exception ignored)
+        {
+            // try field next
+        }
+        if (editor == null)
+        {
+            editor = safeGetField(editorPage, "editor"); //$NON-NLS-1$
+        }
+
+        // Order matters: representation is closest to the rendered form (single Form instance).
+        // viewer/editor/editorPage are progressively further away. We do NOT scan all fields by
+        // type - that risks returning a Form from a stale cache or a sibling editor.
+        Object[] sources = { representation, viewer, editor, editorPage };
+        for (Object source : sources)
+        {
+            if (source == null)
+            {
+                continue;
+            }
+            for (String fieldName : candidateFields)
+            {
+                Object value = safeGetField(source, fieldName);
+                if (value != null && formIface.isInstance(value))
+                {
+                    return value;
+                }
+            }
+            for (String methodName : candidateMethods)
+            {
+                Object value = safeInvokeNoArg(source, methodName);
+                if (value != null && formIface.isInstance(value))
+                {
+                    return value;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Recursively searches a {@code FormItemContainer} for an item with the given name.
+     */
+    private static Object findFormItemByName(Object container, String name, Class<?> containerIface,
+        Class<?> namedIface) throws Exception
+    {
+        Object items = containerIface.getMethod("getItems").invoke(container); //$NON-NLS-1$
+        int size = (Integer)items.getClass().getMethod("size").invoke(items); //$NON-NLS-1$
+        for (int i = 0; i < size; i++)
+        {
+            Object item = items.getClass().getMethod("get", Integer.TYPE).invoke(items, i); //$NON-NLS-1$
+            try
+            {
+                String itemName = (String)namedIface.getMethod("getName").invoke(item); //$NON-NLS-1$
+                if (name.equals(itemName))
+                {
+                    return item;
+                }
+            }
+            catch (Exception ignored)
+            {
+                // not all items are named
+            }
+            if (containerIface.isInstance(item))
+            {
+                Object found = findFormItemByName(item, name, containerIface, namedIface);
+                if (found != null)
+                {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Collects names of all Page form elements (FormGroup with PageGroupExtInfo) reachable from the form.
+     */
+    private static List<String> collectPageNames(Object form)
+    {
+        List<String> result = new ArrayList<>();
+        try
+        {
+            Class<?> containerIface = Class.forName(FORM_ITEM_CONTAINER_CLASS);
+            Class<?> namedIface = Class.forName(NAMED_ELEMENT_CLASS);
+            Class<?> formGroupIface = Class.forName(FORM_GROUP_CLASS);
+            Class<?> pageExtInfoIface;
+            try
+            {
+                pageExtInfoIface = Class.forName(PAGE_GROUP_EXT_INFO_CLASS);
+            }
+            catch (ClassNotFoundException e)
+            {
+                pageExtInfoIface = null;
+            }
+            collectPageNamesRecursive(form, result, containerIface, namedIface, formGroupIface, pageExtInfoIface);
+        }
+        catch (Exception e)
+        {
+            Activator.logWarning("Failed to collect page names: " + e.getMessage()); //$NON-NLS-1$
+        }
+        return result;
+    }
+
+    private static void collectPageNamesRecursive(Object container, List<String> result, Class<?> containerIface,
+        Class<?> namedIface, Class<?> formGroupIface, Class<?> pageExtInfoIface) throws Exception
+    {
+        Object items = containerIface.getMethod("getItems").invoke(container); //$NON-NLS-1$
+        int size = (Integer)items.getClass().getMethod("size").invoke(items); //$NON-NLS-1$
+        for (int i = 0; i < size; i++)
+        {
+            Object item = items.getClass().getMethod("get", Integer.TYPE).invoke(items, i); //$NON-NLS-1$
+            if (formGroupIface.isInstance(item) && pageExtInfoIface != null)
+            {
+                try
+                {
+                    Object extInfo = formGroupIface.getMethod("getExtInfo").invoke(item); //$NON-NLS-1$
+                    if (extInfo != null && pageExtInfoIface.isInstance(extInfo))
+                    {
+                        String name = (String)namedIface.getMethod("getName").invoke(item); //$NON-NLS-1$
+                        if (name != null && !name.isEmpty())
+                        {
+                            result.add(name);
+                        }
+                    }
+                }
+                catch (Exception ignored)
+                {
+                    // skip items without proper accessors
+                }
+            }
+            if (containerIface.isInstance(item))
+            {
+                collectPageNamesRecursive(item, result, containerIface, namedIface, formGroupIface, pageExtInfoIface);
+            }
+        }
+    }
+
+    /**
+     * Calls {@code representation.getRelatedControl(pageItem)} and retries while the WYSIWYG is still building.
+     */
+    private static Object lookupRelatedControl(Object representation, Object pageItem) throws Exception
+    {
+        Display display = Display.getCurrent();
+        Object lastResult = null;
+        for (int attempt = 0; attempt < CONTROL_LOOKUP_RETRIES; attempt++)
+        {
+            lastResult = invokeWithCompatibleParam(representation, GET_RELATED_CONTROL_METHOD, pageItem);
+            if (lastResult != null)
+            {
+                return lastResult;
+            }
+            processEvents(display);
+            sleep(CONTROL_LOOKUP_INTERVAL_MS);
+        }
+        return lastResult;
+    }
+
+    /**
+     * Walks parent chain via {@code getParent()} until a control whose class matches both
+     * {@code simpleClassName} and contains {@code packageHint} in its FQN is found.
+     * <p>
+     * The package hint guards against simple-name collisions (other bundles in OSGi runtime
+     * may have unrelated {@code TabControl} classes).
+     */
+    private static Object findAncestorByClassSimpleName(Object start, String simpleClassName, String packageHint)
+    {
+        Object current = start;
+        int safety = 100;
+        while (current != null && safety-- > 0)
+        {
+            Class<?> cls = current.getClass();
+            if (simpleClassName.equals(cls.getSimpleName())
+                && (packageHint == null || cls.getName().contains(packageHint)))
+            {
+                return current;
+            }
+            Object parent = safeInvokeNoArg(current, GET_PARENT_METHOD);
+            if (parent == null || parent == current)
+            {
+                return null;
+            }
+            current = parent;
+        }
+        return null;
+    }
+
+    /**
+     * Finds and invokes a single-parameter method whose parameter type is assignable from the argument's class.
+     */
+    private static Object invokeWithCompatibleParam(Object target, String methodName, Object arg) throws Exception
+    {
+        Method method = findCompatibleMethod(target.getClass(), methodName, arg);
+        if (method == null)
+        {
+            return null;
+        }
+        method.setAccessible(true);
+        return method.invoke(target, arg);
+    }
+
+    /**
+     * Finds a single-parameter method by name whose parameter type accepts the given argument.
+     * <p>
+     * Among all matching overloads, returns the one with the most specific parameter type - that is,
+     * the deepest in the class hierarchy of {@code arg}. This avoids dispatching to a generic
+     * {@code openTab(Object)} when {@code openTab(TabControl)} also exists.
+     */
+    private static Method findCompatibleMethod(Class<?> targetClass, String methodName, Object arg)
+    {
+        Class<?> argType = (arg != null) ? arg.getClass() : null;
+        Method best = null;
+        Class<?> bestParamType = null;
+
+        Class<?> type = targetClass;
+        while (type != null)
+        {
+            for (Method m : type.getDeclaredMethods())
+            {
+                if (!methodName.equals(m.getName()) || m.getParameterCount() != 1)
+                {
+                    continue;
+                }
+                Class<?> paramType = m.getParameterTypes()[0];
+                if (argType != null && !paramType.isAssignableFrom(argType))
+                {
+                    continue;
+                }
+                if (bestParamType == null || bestParamType.isAssignableFrom(paramType))
+                {
+                    best = m;
+                    bestParamType = paramType;
+                }
+            }
+            type = type.getSuperclass();
+        }
+        for (Method m : targetClass.getMethods())
+        {
+            if (!methodName.equals(m.getName()) || m.getParameterCount() != 1)
+            {
+                continue;
+            }
+            Class<?> paramType = m.getParameterTypes()[0];
+            if (argType != null && !paramType.isAssignableFrom(argType))
+            {
+                continue;
+            }
+            if (bestParamType == null || bestParamType.isAssignableFrom(paramType))
+            {
+                best = m;
+                bestParamType = paramType;
+            }
+        }
+        return best;
+    }
+
+    private static Object safeGetField(Object target, String fieldName)
+    {
+        try
+        {
+            return ReflectionUtils.getFieldValue(target, fieldName);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    private static Object safeInvokeNoArg(Object target, String methodName)
+    {
+        Class<?> type = target.getClass();
+        while (type != null)
+        {
+            try
+            {
+                Method m = type.getDeclaredMethod(methodName);
+                m.setAccessible(true);
+                return m.invoke(target);
+            }
+            catch (NoSuchMethodException e)
+            {
+                type = type.getSuperclass();
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+        }
+        try
+        {
+            Method m = target.getClass().getMethod(methodName);
+            return m.invoke(target);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
     }
 
     // ==================== Internal helpers ====================

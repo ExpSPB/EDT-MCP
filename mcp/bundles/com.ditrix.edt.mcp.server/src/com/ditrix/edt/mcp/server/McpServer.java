@@ -31,7 +31,14 @@ import com.ditrix.edt.mcp.server.tools.impl.GetCheckDescriptionTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetConfigurationPropertiesTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetContentAssistTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetEdtVersionTool;
+import com.ditrix.edt.mcp.server.tools.impl.DcsWorkshopTool;
+import com.ditrix.edt.mcp.server.tools.impl.EditMetadataTool;
+import com.ditrix.edt.mcp.server.tools.impl.ExportObjectTool;
+import com.ditrix.edt.mcp.server.tools.impl.ExtensionWorkshopTool;
+import com.ditrix.edt.mcp.server.tools.impl.MxlWorkshopTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetFormScreenshotTool;
+import com.ditrix.edt.mcp.server.tools.impl.GetFormStructureTool;
+import com.ditrix.edt.mcp.server.tools.impl.GetObjectHelpTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetMetadataDetailsTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetSymbolInfoTool;
 import com.ditrix.edt.mcp.server.tools.impl.GoToDefinitionTool;
@@ -74,6 +81,10 @@ import com.ditrix.edt.mcp.server.tools.impl.DiffModuleTool;
 import com.ditrix.edt.mcp.server.tools.impl.EditFormTool;
 import com.ditrix.edt.mcp.server.tools.impl.AddMetadataAttributeTool;
 import com.ditrix.edt.mcp.server.tools.impl.AiContextTool;
+import com.ditrix.edt.mcp.server.tools.impl.CompareConfigurationsTool;
+import com.ditrix.edt.mcp.server.tools.impl.DependencyGraphTool;
+import com.ditrix.edt.mcp.server.tools.impl.DetectQueryAntiPatternsTool;
+import com.ditrix.edt.mcp.server.tools.impl.ProjectMetricsTool;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -245,6 +256,9 @@ public class McpServer
         registry.register(new GoToDefinitionTool());
         registry.register(new GetSymbolInfoTool());
         registry.register(new GetFormScreenshotTool());
+        registry.register(new GetFormStructureTool());
+        registry.register(new GetObjectHelpTool());
+        registry.register(new ExportObjectTool());
         registry.register(new ValidateQueryTool());
         registry.register(new DiffModuleTool());
         registry.register(new AiContextTool());
@@ -256,6 +270,16 @@ public class McpServer
 
         // Form editing tools
         registry.register(new EditFormTool());
+        registry.register(new EditMetadataTool());
+        registry.register(new DcsWorkshopTool());
+        registry.register(new MxlWorkshopTool());
+        registry.register(new ExtensionWorkshopTool());
+
+        // 1.38 architecture / analysis tools
+        registry.register(new DependencyGraphTool());
+        registry.register(new DetectQueryAntiPatternsTool());
+        registry.register(new ProjectMetricsTool());
+        registry.register(new CompareConfigurationsTool());
 
         Activator.logInfo("Registered " + registry.getToolCount() + " MCP tools"); //$NON-NLS-1$ //$NON-NLS-2$
     }

@@ -44,6 +44,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.MetadataGuards;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 
 /**
@@ -213,10 +214,32 @@ public class AddMetadataAttributeTool implements IMcpTool
                         throw new RuntimeException("Parent object not found in transaction"); //$NON-NLS-1$
                     }
 
+                    // GUARD 1: supplier lock
+                    MetadataGuards.Verdict lock = MetadataGuards.checkSupplierLock(parent);
+                    if (lock.blocked)
+                    {
+                        throw new MetadataGuards.BlockedGuardException(lock);
+                    }
+
+                    // GUARD 2: standard attribute name conflict
+                    MetadataGuards.Verdict conflict = MetadataGuards
+                        .checkStandardAttributeConflict(parent, attributeName);
+                    if (conflict.blocked)
+                    {
+                        throw new MetadataGuards.BlockedGuardException(conflict);
+                    }
+
                     // Check if attribute with this name already exists
                     if (hasAttribute(parent, attributeName))
                     {
-                        throw new RuntimeException("Attribute already exists: " + attributeName); //$NON-NLS-1$
+                        java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
+                        data.put("name", attributeName); //$NON-NLS-1$
+                        data.put("ownerFqn", normalizedParentFqn); //$NON-NLS-1$
+                        data.put("kind", "attribute"); //$NON-NLS-1$ //$NON-NLS-2$
+                        throw new MetadataGuards.BlockedGuardException(MetadataGuards.Verdict.block(
+                            "Attribute already exists: " + attributeName, //$NON-NLS-1$
+                            "Use a different name or remove the existing attribute first.", //$NON-NLS-1$
+                            new MetadataGuards.ErrorTag("alreadyExists", data))); //$NON-NLS-1$
                     }
 
                     // Create and add attribute
@@ -236,6 +259,25 @@ public class AddMetadataAttributeTool implements IMcpTool
         }
         catch (Exception e)
         {
+            MetadataGuards.BlockedGuardException blocked = MetadataGuards.BlockedGuardException
+                .unwrap(e);
+            if (blocked != null)
+            {
+                MetadataGuards.Verdict v = blocked.verdict;
+                String errMsg = v.error != null ? v.error : "blocked"; //$NON-NLS-1$
+                if (v.hint != null && !v.hint.isEmpty())
+                {
+                    errMsg = errMsg + " - " + v.hint; //$NON-NLS-1$
+                }
+                ToolResult err = ToolResult.error("Failed to add attribute: " + errMsg) //$NON-NLS-1$
+                    .put("parentFqn", normalizedParentFqn) //$NON-NLS-1$
+                    .put("attributeName", attributeName); //$NON-NLS-1$
+                if (v.tag != null)
+                {
+                    err.put(v.tag.name, v.tag.data);
+                }
+                return err.toJson();
+            }
             Activator.logError("Error adding attribute", e); //$NON-NLS-1$
             String msg = e.getMessage();
             if (e.getCause() != null && e.getCause().getMessage() != null)

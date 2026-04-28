@@ -37,7 +37,8 @@ public class GetFormScreenshotTool implements IMcpTool
     public String getDescription()
     {
         return "Capture a screenshot of the active form WYSIWYG editor as PNG. " + //$NON-NLS-1$
-            "Can open and activate a form automatically by metadata FQN path."; //$NON-NLS-1$
+            "Can open and activate a form automatically by metadata FQN path. " + //$NON-NLS-1$
+            "Can activate a specific Page form element before capture via activePage parameter."; //$NON-NLS-1$
     }
 
     @Override
@@ -52,6 +53,11 @@ public class GetFormScreenshotTool implements IMcpTool
                 "Examples: 'Catalog.Products.Forms.ItemForm', 'Document.SalesOrder.Forms.DocumentForm', " + //$NON-NLS-1$
                 "'CommonForm.MyForm'. If not specified, captures the currently active form editor.") //$NON-NLS-1$
             .booleanProperty("refresh", "Force WYSIWYG refresh before capture (default: false)") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("activePage", //$NON-NLS-1$
+                "Name of a Page form element to activate before capture. " //$NON-NLS-1$
+                    + "Requires formPath. Search is recursive across the whole form by element name; " //$NON-NLS-1$
+                    + "if multiple Page elements share a name, the first depth-first match is used. " //$NON-NLS-1$
+                    + "If the page is not found, an error with the list of available pages is returned.") //$NON-NLS-1$
             .build();
     }
 
@@ -82,11 +88,17 @@ public class GetFormScreenshotTool implements IMcpTool
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String formPath = JsonUtils.extractStringArgument(params, "formPath"); //$NON-NLS-1$
         boolean refresh = "true".equalsIgnoreCase(JsonUtils.extractStringArgument(params, "refresh")); //$NON-NLS-1$ //$NON-NLS-2$
+        String activePage = JsonUtils.extractStringArgument(params, "activePage"); //$NON-NLS-1$
 
         if (formPath != null && !formPath.isEmpty()
             && (projectName == null || projectName.isEmpty()))
         {
             return ToolResult.error("projectName is required when formPath is specified").toJson(); //$NON-NLS-1$
+        }
+
+        if (activePage != null && !activePage.isEmpty() && (formPath == null || formPath.isEmpty()))
+        {
+            return ToolResult.error("activePage requires formPath").toJson(); //$NON-NLS-1$
         }
 
         Display display = Display.getDefault();
@@ -96,7 +108,7 @@ public class GetFormScreenshotTool implements IMcpTool
         }
 
         AtomicReference<CaptureResult> resultRef = new AtomicReference<>();
-        display.syncExec(() -> resultRef.set(captureScreenshot(projectName, formPath, refresh)));
+        display.syncExec(() -> resultRef.set(captureScreenshot(projectName, formPath, refresh, activePage)));
 
         CaptureResult result = resultRef.get();
         if (!result.isSuccess())
@@ -110,7 +122,7 @@ public class GetFormScreenshotTool implements IMcpTool
     /**
      * Main capture logic. Runs on the UI thread.
      */
-    private CaptureResult captureScreenshot(String projectName, String formPath, boolean refresh)
+    private CaptureResult captureScreenshot(String projectName, String formPath, boolean refresh, String activePage)
     {
         try
         {
@@ -150,6 +162,15 @@ public class GetFormScreenshotTool implements IMcpTool
                     return CaptureResult.error(ToolResult.error(
                         "No active form editor page found. " + //$NON-NLS-1$
                         "Specify formPath parameter to open a form automatically.").toJson()); //$NON-NLS-1$
+                }
+            }
+
+            if (activePage != null && !activePage.isEmpty())
+            {
+                String pageError = EditorScreenshotHelper.activatePageInForm(editorPage, activePage);
+                if (pageError != null)
+                {
+                    return CaptureResult.error(pageError);
                 }
             }
 

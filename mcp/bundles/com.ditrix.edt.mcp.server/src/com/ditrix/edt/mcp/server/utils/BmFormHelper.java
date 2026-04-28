@@ -214,7 +214,9 @@ public class BmFormHelper
 
             Object result = executeMethod.invoke(bmModelManager, project, taskProxy);
 
-            if (result instanceof String)
+            // Error case: the proxy / action returns a String prefixed with
+            // "Error:" to surface a fatal condition (form not found, etc.).
+            if (result instanceof String && ((String) result).startsWith("Error:")) //$NON-NLS-1$
             {
                 return (String) result;
             }
@@ -224,7 +226,14 @@ public class BmFormHelper
             // and the Form.form file on disk is never updated.
             persistFormChanges(bmModelManager, project, formFqn);
 
-            return null; // Success, no error
+            // Success-with-message: the action returns a non-error String
+            // describing what it did (e.g. "added attribute X"). Surface it
+            // into the response while still persisting first.
+            if (result instanceof String)
+            {
+                return (String) result;
+            }
+            return null; // Success, no message
         }
         catch (Exception e)
         {
@@ -395,6 +404,172 @@ public class BmFormHelper
         formCommandIface.getMethod("setId", Integer.TYPE).invoke(command, nextId()); //$NON-NLS-1$
         setTitle(command, title);
         return command;
+    }
+
+    /**
+     * Creates a form attribute with the given name and optional title via
+     * {@code FormFactory.createFormAttribute()}. The caller adds the result
+     * to the form's attributes collection via {@link #addAttributeToForm}.
+     *
+     * @param name attribute name (mandatory)
+     * @param title attribute title (optional)
+     * @return the created FormAttribute object
+     * @throws Exception if creation fails
+     */
+    public Object createFormAttribute(String name, String title) throws Exception
+    {
+        Object attribute = ffClass.getMethod("createFormAttribute").invoke(formFactory); //$NON-NLS-1$
+        namedIface.getMethod("setName", String.class).invoke(attribute, name); //$NON-NLS-1$
+        if (title != null && !title.isEmpty())
+        {
+            try
+            {
+                setTitle(attribute, title);
+            }
+            catch (Exception ignored)
+            {
+                // FormAttribute may not implement Titled in every EDT version
+            }
+        }
+        return attribute;
+    }
+
+    /**
+     * Sets a property on the form item identified by {@code itemName} inside
+     * {@code container} (form or sub-group). Uses reflection on
+     * {@code setXxx(...)} setters with best-effort coercion for booleans
+     * and the title pseudo-property (delegates to {@link #setTitle}).
+     * <p>
+     * Supported property names (case-sensitive against EMF setters):
+     * {@code title}, {@code visible}, {@code enabled}, {@code readOnly},
+     * {@code dataPath}, plus any EMF feature exposed as {@code setXxx}.
+     *
+     * @return {@code null} on success, an error description otherwise
+     */
+    public String setItemProperty(Object container, String itemName, String property, String value)
+        throws Exception
+    {
+        Object item = findItemByName(container, itemName);
+        if (item == null)
+        {
+            return "Form item not found: " + itemName; //$NON-NLS-1$
+        }
+        if (property == null || property.isEmpty())
+        {
+            return "property is required"; //$NON-NLS-1$
+        }
+        // Pseudo-property: title -> setTitle (handles the localized map)
+        if ("title".equalsIgnoreCase(property)) //$NON-NLS-1$
+        {
+            try
+            {
+                setTitle(item, value);
+                return null;
+            }
+            catch (Exception e)
+            {
+                return "Failed to set title: " + e.getMessage(); //$NON-NLS-1$
+            }
+        }
+        if ("dataPath".equalsIgnoreCase(property)) //$NON-NLS-1$
+        {
+            try
+            {
+                setDataPath(item, value);
+                return null;
+            }
+            catch (Exception e)
+            {
+                return "Failed to set dataPath: " + e.getMessage(); //$NON-NLS-1$
+            }
+        }
+        String setter = "set" + Character.toUpperCase(property.charAt(0)) //$NON-NLS-1$
+            + property.substring(1);
+        for (Method m : item.getClass().getMethods())
+        {
+            if (!setter.equals(m.getName()) || m.getParameterCount() != 1)
+            {
+                continue;
+            }
+            Class<?> paramType = m.getParameterTypes()[0];
+            try
+            {
+                Object converted = coerceFormValue(value, paramType);
+                m.invoke(item, converted);
+                return null;
+            }
+            catch (Exception e)
+            {
+                return "Failed to set " + property + ": " + e.getMessage(); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        return "Property '" + property + "' not found on " //$NON-NLS-1$ //$NON-NLS-2$
+            + item.getClass().getSimpleName();
+    }
+
+    /**
+     * Best-effort coercion to a setter's parameter type: boolean, int, enum,
+     * String. Other types are returned as-is and may throw downstream.
+     */
+    private static Object coerceFormValue(String value, Class<?> targetType)
+    {
+        if (value == null || targetType == String.class)
+        {
+            return value;
+        }
+        if (targetType == boolean.class || targetType == Boolean.class)
+        {
+            return Boolean.valueOf(value);
+        }
+        if (targetType == int.class || targetType == Integer.class)
+        {
+            return Integer.valueOf(value);
+        }
+        if (targetType == long.class || targetType == Long.class)
+        {
+            return Long.valueOf(value);
+        }
+        if (targetType.isEnum())
+        {
+            try
+            {
+                Method get = targetType.getMethod("get", String.class); //$NON-NLS-1$
+                Object r = get.invoke(null, value);
+                if (r != null)
+                {
+                    return r;
+                }
+            }
+            catch (Exception ignored)
+            {
+                // fall through
+            }
+            try
+            {
+                Method getByName = targetType.getMethod("getByName", String.class); //$NON-NLS-1$
+                Object r = getByName.invoke(null, value);
+                if (r != null)
+                {
+                    return r;
+                }
+            }
+            catch (Exception ignored)
+            {
+                // fall through
+            }
+            // Constant scan as the final fallback.
+            for (Object c : targetType.getEnumConstants())
+            {
+                if (c.toString().equalsIgnoreCase(value)
+                    || ((Enum<?>) c).name().equalsIgnoreCase(value))
+                {
+                    return c;
+                }
+            }
+            throw new IllegalArgumentException("Unknown enum value '" + value //$NON-NLS-1$
+                + "' for type " + targetType.getSimpleName()); //$NON-NLS-1$
+        }
+        return value;
     }
 
     // -----------------------------------------------------------------------

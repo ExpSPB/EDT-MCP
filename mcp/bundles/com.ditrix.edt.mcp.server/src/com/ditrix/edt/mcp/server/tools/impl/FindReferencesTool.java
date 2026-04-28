@@ -90,6 +90,11 @@ public class FindReferencesTool implements IMcpTool
                 "Russian type names are also supported (e.g. '\u0421\u043F\u0440\u0430\u0432\u043E\u0447\u043D\u0438\u043A.\u041D\u043E\u043C\u0435\u043D\u043A\u043B\u0430\u0442\u0443\u0440\u0430')", true) //$NON-NLS-1$
             .integerProperty("limit", //$NON-NLS-1$
                 "Maximum number of results per category. Default: 100") //$NON-NLS-1$
+            .booleanProperty("deep", //$NON-NLS-1$
+                "Expand produced-type tracking: for each found type-reference, label it with " + //$NON-NLS-1$
+                "the specific kind (Object, Reference, Selection, Manager, Cache, List) " + //$NON-NLS-1$
+                "based on its EClass. Default: false. " + //$NON-NLS-1$
+                "Useful for refactoring impact analysis.") //$NON-NLS-1$
             .build();
     }
     
@@ -117,7 +122,8 @@ public class FindReferencesTool implements IMcpTool
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String objectFqn = JsonUtils.extractStringArgument(params, "objectFqn"); //$NON-NLS-1$
         String limitStr = JsonUtils.extractStringArgument(params, "limit"); //$NON-NLS-1$
-        
+        boolean deep = JsonUtils.extractBooleanArgument(params, "deep", false); //$NON-NLS-1$
+
         // Validate required parameters
         if (projectName == null || projectName.isEmpty())
         {
@@ -127,7 +133,7 @@ public class FindReferencesTool implements IMcpTool
         {
             return "Error: objectFqn is required"; //$NON-NLS-1$
         }
-        
+
         int limit = 100;
         if (limitStr != null && !limitStr.isEmpty())
         {
@@ -140,16 +146,17 @@ public class FindReferencesTool implements IMcpTool
                 // Use default
             }
         }
-        
+
         // Execute on UI thread
         AtomicReference<String> resultRef = new AtomicReference<>();
         final int maxResults = limit;
-        
+        final boolean deepFinal = deep;
+
         Display display = PlatformUI.getWorkbench().getDisplay();
         display.syncExec(() -> {
             try
             {
-                String result = findReferencesInternal(projectName, objectFqn, maxResults);
+                String result = findReferencesInternal(projectName, objectFqn, maxResults, deepFinal);
                 resultRef.set(result);
             }
             catch (Exception e)
@@ -158,14 +165,14 @@ public class FindReferencesTool implements IMcpTool
                 resultRef.set("Error: " + e.getMessage()); //$NON-NLS-1$
             }
         });
-        
+
         return resultRef.get();
     }
-    
+
     /**
      * Internal implementation that runs on UI thread.
      */
-    private String findReferencesInternal(String projectName, String objectFqn, int limit)
+    private String findReferencesInternal(String projectName, String objectFqn, int limit, boolean deep)
     {
         // Normalize Russian metadata type names: "Справочник.Номенклатура" -> "Catalog.Номенклатура"
         objectFqn = MetadataTypeUtils.normalizeFqn(objectFqn);
@@ -221,7 +228,7 @@ public class FindReferencesTool implements IMcpTool
         }
         
         // Collect all references
-        ReferenceCollector collector = new ReferenceCollector(bmModel, targetObject, limit);
+        ReferenceCollector collector = new ReferenceCollector(bmModel, targetObject, limit, deep);
         
         try
         {
@@ -402,16 +409,18 @@ public class FindReferencesTool implements IMcpTool
         private final IBmModel bmModel;
         private final MdObject targetObject;
         private final int limit;
+        private final boolean deep;
         private final List<ReferenceInfo> references = new ArrayList<>();
         /** Set to track unique references (category:path:feature) to avoid duplicates */
         private final java.util.Set<String> seenReferences = new java.util.HashSet<>();
-        
-        ReferenceCollector(IBmModel bmModel, MdObject targetObject, int limit)
+
+        ReferenceCollector(IBmModel bmModel, MdObject targetObject, int limit, boolean deep)
         {
             super("Find references to " + targetObject.getName()); //$NON-NLS-1$
             this.bmModel = bmModel;
             this.targetObject = targetObject;
             this.limit = limit;
+            this.deep = deep;
         }
         
         @Override
@@ -513,37 +522,87 @@ public class FindReferencesTool implements IMcpTool
             {
                 return;
             }
-            
+
             for (EObject type : producedTypes.eContents())
             {
                 TypeItem typeItem = getTypeItem(type);
-                if (typeItem instanceof IBmObject)
+                if (!(typeItem instanceof IBmObject))
                 {
-                    Collection<IBmCrossReference> refs = engine.getBackReferences((IBmObject) typeItem);
-                    for (IBmCrossReference ref : refs)
-                    {
-                        if (references.size() >= limit * 10)
-                        {
-                            break;
-                        }
-                        
-                        IBmObject sourceObject = ref.getObject();
-                        if (sourceObject == null || isInternalReference(ref))
-                        {
-                            continue;
-                        }
-                        
-                        String category = getCategoryFromObject(sourceObject);
-                        String sourcePath = getFullReferencePath(sourceObject, ref);
-                        if (sourcePath == null)
-                        {
-                            continue;
-                        }
-                        String feature = "Type: " + (ref.getFeature() != null ? ref.getFeature().getName() : ""); //$NON-NLS-1$ //$NON-NLS-2$
-                        
-                        addReference(new ReferenceInfo(category, sourcePath, feature));
-                    }
+                    continue;
                 }
+                String typeKind = deep ? classifyTypeKind(type) : null;
+
+                Collection<IBmCrossReference> refs = engine.getBackReferences((IBmObject) typeItem);
+                for (IBmCrossReference ref : refs)
+                {
+                    if (references.size() >= limit * 10)
+                    {
+                        break;
+                    }
+
+                    IBmObject sourceObject = ref.getObject();
+                    if (sourceObject == null || isInternalReference(ref))
+                    {
+                        continue;
+                    }
+
+                    String category = getCategoryFromObject(sourceObject);
+                    String sourcePath = getFullReferencePath(sourceObject, ref);
+                    if (sourcePath == null)
+                    {
+                        continue;
+                    }
+                    String featureName = ref.getFeature() != null ? ref.getFeature().getName() : ""; //$NON-NLS-1$
+                    String feature = typeKind != null
+                        ? "Type[" + typeKind + "]: " + featureName //$NON-NLS-1$ //$NON-NLS-2$
+                        : "Type: " + featureName; //$NON-NLS-1$
+
+                    addReference(new ReferenceInfo(category, sourcePath, feature));
+                }
+            }
+        }
+
+        /**
+         * Maps a produced-type EObject to a short kind label for the deep mode.
+         * EDT names produced types with suffixes such as {@code RefMdType},
+         * {@code ObjectMdType}, {@code SelectionMdType}, {@code ManagerMdType},
+         * {@code CacheMdType}, {@code ListMdType}. We extract the prefix.
+         */
+        private String classifyTypeKind(EObject type)
+        {
+            if (type == null)
+            {
+                return null;
+            }
+            String className = type.eClass().getName();
+            if (className == null || className.isEmpty())
+            {
+                return null;
+            }
+            // Strip trailing "MdType"/"MdTypeSet" suffix
+            String trimmed = className;
+            for (String suffix : new String[] { "MdTypeSet", "MdType", "TypeSet", "Type" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            {
+                if (trimmed.endsWith(suffix))
+                {
+                    trimmed = trimmed.substring(0, trimmed.length() - suffix.length());
+                    break;
+                }
+            }
+            if (trimmed.isEmpty())
+            {
+                return className;
+            }
+            // Normalize the most common kinds.
+            switch (trimmed)
+            {
+                case "Ref": return "Reference"; //$NON-NLS-1$ //$NON-NLS-2$
+                case "Object": return "Object"; //$NON-NLS-1$ //$NON-NLS-2$
+                case "Selection": return "Selection"; //$NON-NLS-1$ //$NON-NLS-2$
+                case "Manager": return "Manager"; //$NON-NLS-1$ //$NON-NLS-2$
+                case "Cache": return "Cache"; //$NON-NLS-1$ //$NON-NLS-2$
+                case "List": return "List"; //$NON-NLS-1$ //$NON-NLS-2$
+                default: return trimmed;
             }
         }
         

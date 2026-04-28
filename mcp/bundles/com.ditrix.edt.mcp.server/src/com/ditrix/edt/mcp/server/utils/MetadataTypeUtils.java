@@ -486,6 +486,7 @@ public final class MetadataTypeUtils
             return similar;
         }
 
+        // Primary pass: cheap substring match. Catches most typos and partials.
         String nameLower = name.toLowerCase();
         for (MdObject obj : objects)
         {
@@ -501,7 +502,93 @@ public final class MetadataTypeUtils
             }
         }
 
+        if (!similar.isEmpty())
+        {
+            return similar;
+        }
+
+        // Fallback: Levenshtein distance for transposition / dropped-letter typos
+        // (e.g. "СообщитПользоателю" -> "СообщитьПользователю").
+        // Threshold scales with input length: max(2, len/5) edits allowed.
+        int threshold = Math.max(2, name.length() / 5);
+        List<int[]> rankedIndices = new ArrayList<>();
+        for (int i = 0; i < objects.size(); i++)
+        {
+            String objName = objects.get(i).getName();
+            int distance = levenshtein(objName.toLowerCase(), nameLower);
+            if (distance <= threshold)
+            {
+                rankedIndices.add(new int[] { i, distance });
+            }
+        }
+        rankedIndices.sort((a, b) -> Integer.compare(a[1], b[1]));
+        for (int[] entry : rankedIndices)
+        {
+            similar.add(objects.get(entry[0]).getName());
+            if (similar.size() >= maxResults)
+            {
+                break;
+            }
+        }
         return similar;
+    }
+
+    /**
+     * Iterative Levenshtein distance with O(min(m, n)) memory.
+     * Used as a last-resort fuzzy match for "did you mean?" suggestions.
+     */
+    static int levenshtein(String a, String b)
+    {
+        if (a == null || b == null)
+        {
+            return Integer.MAX_VALUE;
+        }
+        if (a.equals(b))
+        {
+            return 0;
+        }
+        int m = a.length();
+        int n = b.length();
+        if (m == 0)
+        {
+            return n;
+        }
+        if (n == 0)
+        {
+            return m;
+        }
+        // Always iterate over the shorter string to keep the row small.
+        if (m > n)
+        {
+            String tmp = a;
+            a = b;
+            b = tmp;
+            int t = m;
+            m = n;
+            n = t;
+        }
+        int[] prev = new int[m + 1];
+        int[] curr = new int[m + 1];
+        for (int i = 0; i <= m; i++)
+        {
+            prev[i] = i;
+        }
+        for (int j = 1; j <= n; j++)
+        {
+            curr[0] = j;
+            char bj = b.charAt(j - 1);
+            for (int i = 1; i <= m; i++)
+            {
+                int cost = a.charAt(i - 1) == bj ? 0 : 1;
+                curr[i] = Math.min(
+                    Math.min(prev[i] + 1, curr[i - 1] + 1),
+                    prev[i - 1] + cost);
+            }
+            int[] swap = prev;
+            prev = curr;
+            curr = swap;
+        }
+        return prev[m];
     }
 
     /**

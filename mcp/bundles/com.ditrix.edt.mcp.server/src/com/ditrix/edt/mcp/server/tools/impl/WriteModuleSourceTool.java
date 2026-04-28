@@ -22,15 +22,22 @@ import org.eclipse.core.resources.IResource;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.Path;
 
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
+
+import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.BmExportHelper;
+import com.ditrix.edt.mcp.server.utils.FileMarkers;
 import com.ditrix.edt.mcp.server.utils.FrontMatter;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 
 /**
  * Tool to write BSL source code to 1C metadata object modules.
- * Supports modes: searchReplace (content-based, default), replace (full file), append.
+ * Supports 7 modes: searchReplace (content-based, default), replace (full file),
+ * append, replaceLines, replaceMethod, insertBefore, insertAfter.
  * Optionally validates BSL syntax (balanced block keywords) before writing.
  * Can resolve module path from objectName + moduleType.
  */
@@ -43,6 +50,8 @@ public class WriteModuleSourceTool implements IMcpTool
     private static final String MODE_SEARCH_REPLACE = "searchReplace"; //$NON-NLS-1$
     private static final String MODE_REPLACE_LINES = "replaceLines"; //$NON-NLS-1$
     private static final String MODE_REPLACE_METHOD = "replaceMethod"; //$NON-NLS-1$
+    private static final String MODE_INSERT_BEFORE = "insertBefore"; //$NON-NLS-1$
+    private static final String MODE_INSERT_AFTER = "insertAfter"; //$NON-NLS-1$
 
     /** Maximum source length to prevent accidental huge writes */
     private static final int MAX_SOURCE_LENGTH = 500_000;
@@ -60,9 +69,10 @@ public class WriteModuleSourceTool implements IMcpTool
     public String getDescription()
     {
         return "Write BSL source code to 1C metadata object modules. " + //$NON-NLS-1$
-            "Modes: searchReplace (find oldSource and replace with source, default), " + //$NON-NLS-1$
+            "7 modes: searchReplace (find oldSource and replace with source, default), " + //$NON-NLS-1$
             "replace (replace entire file), append (add to end), " + //$NON-NLS-1$
-            "replaceLines (replace line range), replaceMethod (replace entire method by name). " + //$NON-NLS-1$
+            "replaceLines (replace line range), replaceMethod (replace entire method by name), " + //$NON-NLS-1$
+            "insertBefore (insert source before line N), insertAfter (insert source after line N). " + //$NON-NLS-1$
             "Specify modulePath or objectName + moduleType. " + //$NON-NLS-1$
             "Automatically checks BSL syntax (balanced Procedure/EndProcedure, " + //$NON-NLS-1$
             "Function/EndFunction, If/EndIf, etc.) before writing - " + //$NON-NLS-1$
@@ -101,7 +111,8 @@ public class WriteModuleSourceTool implements IMcpTool
             .stringProperty("mode", //$NON-NLS-1$
                 "Write mode: 'searchReplace' (find oldSource and replace with source, default), " + //$NON-NLS-1$
                 "'replace' (replace entire file), 'append' (add to end), " + //$NON-NLS-1$
-                "'replaceLines' (replace line range), 'replaceMethod' (replace entire method by name).") //$NON-NLS-1$
+                "'replaceLines' (replace line range), 'replaceMethod' (replace entire method by name), " + //$NON-NLS-1$
+                "'insertBefore' (insert source before line N), 'insertAfter' (insert source after line N).") //$NON-NLS-1$
             .stringProperty("formName", //$NON-NLS-1$
                 "Form name, required when moduleType=FormModule " + //$NON-NLS-1$
                 "(e.g. 'ItemForm').") //$NON-NLS-1$
@@ -114,6 +125,10 @@ public class WriteModuleSourceTool implements IMcpTool
                 "End line number for replaceLines mode (1-based, inclusive)") //$NON-NLS-1$
             .stringProperty("methodName", //$NON-NLS-1$
                 "Method name for replaceMethod mode (finds Procedure/Function by name)") //$NON-NLS-1$
+            .integerProperty("line", //$NON-NLS-1$
+                "1-based line number for insertBefore/insertAfter modes. " + //$NON-NLS-1$
+                "insertBefore: source is placed before line N (existing line N becomes N+sourceLines). " + //$NON-NLS-1$
+                "insertAfter: source is placed after line N (existing line N+1 shifts down).") //$NON-NLS-1$
             .booleanProperty("dryRun", //$NON-NLS-1$
                 "Preview changes without writing. Returns diff stats " + //$NON-NLS-1$
                 "(linesBefore, linesAfter, removedLines, addedLines)") //$NON-NLS-1$
@@ -122,6 +137,16 @@ public class WriteModuleSourceTool implements IMcpTool
                 "By default, checks balanced Procedure/EndProcedure, " + //$NON-NLS-1$
                 "Function/EndFunction, If/EndIf, While/EndDo, " + //$NON-NLS-1$
                 "For/EndDo, Try/EndTry. Set true to force write.") //$NON-NLS-1$
+            .booleanProperty("validateAfterWrite", //$NON-NLS-1$
+                "Run EDT validation after a successful write and embed the result " + //$NON-NLS-1$
+                "in the response (default: true). Adds a 'validation' block with " + //$NON-NLS-1$
+                "errors / warnings / codeStyle counts and a hint. " + //$NON-NLS-1$
+                "Pass false for batch sequences and call get_project_errors at the end.") //$NON-NLS-1$
+            .booleanProperty("confirmFullReplace", //$NON-NLS-1$
+                "Required (set to true) when a write removes more than 50% of " + //$NON-NLS-1$
+                "an existing module. Prevents accidental destruction of " + //$NON-NLS-1$
+                "hundreds of lines when only one method or fragment was intended " + //$NON-NLS-1$
+                "to change. Reads at >30% emit a non-blocking 'protection' warning.") //$NON-NLS-1$
             .build();
     }
 
@@ -159,8 +184,11 @@ public class WriteModuleSourceTool implements IMcpTool
         int lineFrom = JsonUtils.extractIntArgument(params, "lineFrom", -1); //$NON-NLS-1$
         int lineTo = JsonUtils.extractIntArgument(params, "lineTo", -1); //$NON-NLS-1$
         String methodName = JsonUtils.extractStringArgument(params, "methodName"); //$NON-NLS-1$
+        int line = JsonUtils.extractIntArgument(params, "line", -1); //$NON-NLS-1$
         boolean dryRun = JsonUtils.extractBooleanArgument(params, "dryRun", false); //$NON-NLS-1$
         boolean skipSyntaxCheck = JsonUtils.extractBooleanArgument(params, "skipSyntaxCheck", false); //$NON-NLS-1$
+        boolean validateAfterWrite = JsonUtils.extractBooleanArgument(params, "validateAfterWrite", true); //$NON-NLS-1$
+        boolean confirmFullReplace = JsonUtils.extractBooleanArgument(params, "confirmFullReplace", false); //$NON-NLS-1$
 
         // 2. Validate required parameters
         if (projectName == null || projectName.isEmpty())
@@ -185,10 +213,12 @@ public class WriteModuleSourceTool implements IMcpTool
         // Validate mode
         if (!MODE_REPLACE.equals(mode) && !MODE_APPEND.equals(mode)
             && !MODE_SEARCH_REPLACE.equals(mode)
-            && !MODE_REPLACE_LINES.equals(mode) && !MODE_REPLACE_METHOD.equals(mode))
+            && !MODE_REPLACE_LINES.equals(mode) && !MODE_REPLACE_METHOD.equals(mode)
+            && !MODE_INSERT_BEFORE.equals(mode) && !MODE_INSERT_AFTER.equals(mode))
         {
             return "Error: invalid mode '" + mode + "'. " + //$NON-NLS-1$ //$NON-NLS-2$
-                "Allowed: searchReplace, replace, append, replaceLines, replaceMethod"; //$NON-NLS-1$
+                "Allowed: searchReplace, replace, append, replaceLines, replaceMethod, " + //$NON-NLS-1$
+                "insertBefore, insertAfter"; //$NON-NLS-1$
         }
 
         // Validate oldSource for searchReplace mode
@@ -341,6 +371,55 @@ public class WriteModuleSourceTool implements IMcpTool
                     break;
                 }
 
+                case MODE_INSERT_BEFORE:
+                {
+                    if (line < 1)
+                    {
+                        return "Error: line is required for insertBefore mode " + //$NON-NLS-1$
+                            "and must be >= 1 (1-based)"; //$NON-NLS-1$
+                    }
+                    if (line > totalOriginal)
+                    {
+                        return "Error: line (" + line + ") exceeds file length (" + //$NON-NLS-1$ //$NON-NLS-2$
+                            totalOriginal + " lines). " + //$NON-NLS-1$
+                            "Use 'append' mode to add at end."; //$NON-NLS-1$
+                    }
+                    newLines = new ArrayList<>();
+                    // Lines before insertion point (0..line-1 exclusive of line index line-1)
+                    newLines.addAll(originalLines.subList(0, line - 1));
+                    // New content
+                    newLines.addAll(splitSourceLines(source));
+                    // Original line N and the rest
+                    newLines.addAll(originalLines.subList(line - 1, totalOriginal));
+                    break;
+                }
+
+                case MODE_INSERT_AFTER:
+                {
+                    if (line < 1)
+                    {
+                        return "Error: line is required for insertAfter mode " + //$NON-NLS-1$
+                            "and must be >= 1 (1-based)"; //$NON-NLS-1$
+                    }
+                    if (line > totalOriginal)
+                    {
+                        return "Error: line (" + line + ") exceeds file length (" + //$NON-NLS-1$ //$NON-NLS-2$
+                            totalOriginal + " lines). " + //$NON-NLS-1$
+                            "Use 'append' mode to add at end."; //$NON-NLS-1$
+                    }
+                    newLines = new ArrayList<>();
+                    // Lines up to and including line N (0-indexed: 0..line)
+                    newLines.addAll(originalLines.subList(0, line));
+                    // New content
+                    newLines.addAll(splitSourceLines(source));
+                    // Lines after N
+                    if (line < totalOriginal)
+                    {
+                        newLines.addAll(originalLines.subList(line, totalOriginal));
+                    }
+                    break;
+                }
+
                 case MODE_REPLACE_METHOD:
                 {
                     if (methodName == null || methodName.isEmpty())
@@ -412,12 +491,30 @@ public class WriteModuleSourceTool implements IMcpTool
                     return "Error: unsupported mode: " + mode; //$NON-NLS-1$
             }
 
-            // 8. Protection warning for large removals
+            // 8. Protection: warn at >30%, hard-stop at >50% unless confirmFullReplace=true.
+            //    Skipped for explicit MODE_REPLACE, where wholesale replacement is intended.
             String protectionWarning = null;
-            if (totalOriginal > 10 && newLines.size() < totalOriginal * 0.7)
+            if (totalOriginal > 10 && !MODE_REPLACE.equals(mode))
             {
-                protectionWarning = "WARNING: this change removes over 30% of the module (from " //$NON-NLS-1$
-                    + totalOriginal + " to " + newLines.size() + " lines)"; //$NON-NLS-1$ //$NON-NLS-2$
+                int removed = totalOriginal - newLines.size();
+                if (removed > 0)
+                {
+                    int removalPercent = (int)Math.round(100.0 * removed / totalOriginal);
+                    if (removalPercent > 50 && !confirmFullReplace)
+                    {
+                        return "Error: this change would remove " + removalPercent + "% of the module (" //$NON-NLS-1$ //$NON-NLS-2$
+                            + removed + " of " + totalOriginal + " lines). " //$NON-NLS-1$ //$NON-NLS-2$
+                            + "Pass confirmFullReplace=true to proceed, " //$NON-NLS-1$
+                            + "or use a more targeted mode (replaceMethod, replaceLines, " //$NON-NLS-1$
+                            + "searchReplace) to change a smaller fragment."; //$NON-NLS-1$
+                    }
+                    if (removalPercent > 30)
+                    {
+                        protectionWarning = "WARNING: this change removes " + removalPercent //$NON-NLS-1$
+                            + "% of the module (from " + totalOriginal //$NON-NLS-1$
+                            + " to " + newLines.size() + " lines)"; //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                }
             }
 
             // 9. Dry run - preview without writing
@@ -473,7 +570,20 @@ public class WriteModuleSourceTool implements IMcpTool
             // 11. Write file
             writeFile(file, newLines, hasBom, fileExists);
 
-            // 12. Build frontmatter
+            // 11b. Persistence sync - force BM to flush in-memory module to disk index
+            //      so subsequent reads (validation, F7, deploy) see the new content.
+            //      This is the prerequisite for reliable validateAfterWrite below.
+            String moduleFqn = resolveFqnForValidation(objectName, modulePath);
+            PersistenceResult persistence = forceExportModule(project, moduleFqn);
+
+            // 12. Optional EDT validation feedback
+            FileMarkers.Grouped validation = null;
+            if (validateAfterWrite)
+            {
+                validation = collectValidation(project, objectName, modulePath);
+            }
+
+            // 13. Build frontmatter
             FrontMatter fm = FrontMatter.create()
                 .put("tool", NAME) //$NON-NLS-1$
                 .put("projectName", projectName) //$NON-NLS-1$
@@ -497,17 +607,235 @@ public class WriteModuleSourceTool implements IMcpTool
                 fm.put("protection", protectionWarning); //$NON-NLS-1$
             }
 
-            // 13. Return success
-            StringBuilder successMsg = new StringBuilder("File written successfully"); //$NON-NLS-1$
+            if (validation != null)
+            {
+                fm.put("validationErrors", validation.errorCount()); //$NON-NLS-1$
+                fm.put("validationWarnings", validation.warningCount()); //$NON-NLS-1$
+                fm.put("validationCodeStyle", validation.codeStyleCount()); //$NON-NLS-1$
+                fm.put("validationHint", buildValidationHint(validation)); //$NON-NLS-1$
+            }
+
+            fm.put("persistenceSyncOk", persistence.ok); //$NON-NLS-1$
+            fm.put("persistenceSyncMs", persistence.elapsedMs); //$NON-NLS-1$
+            if (persistence.detail != null && !persistence.detail.isEmpty())
+            {
+                fm.put("persistenceSyncDetail", persistence.detail); //$NON-NLS-1$
+            }
+
+            // 14. Return success
+            StringBuilder body = new StringBuilder("File written successfully"); //$NON-NLS-1$
             if (protectionWarning != null)
             {
-                successMsg.append("\n\n**").append(protectionWarning).append("**"); //$NON-NLS-1$ //$NON-NLS-2$
+                body.append("\n\n**").append(protectionWarning).append("**"); //$NON-NLS-1$ //$NON-NLS-2$
             }
-            return fm.wrapContent(successMsg.toString());
+            if (validation != null)
+            {
+                appendValidationSection(body, validation);
+            }
+            return fm.wrapContent(body.toString());
         }
         catch (Exception e)
         {
             return "Error writing file: " + e.getMessage(); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Result of {@link #forceExportModule(IProject, String)}.
+     */
+    private static final class PersistenceResult
+    {
+        boolean ok;
+        long elapsedMs;
+        String detail; // human-readable diagnostic when not ok or skipped
+    }
+
+    /**
+     * Delegates to {@link BmExportHelper#forceExportAndWait} so that every
+     * write triggers the same wait-for-segment behaviour as the rest of the
+     * BM-mutating tools (1.34+). Falls back to a "skipped" persistence result
+     * when {@code IBmModelManager} is unavailable or no FQN can be resolved.
+     */
+    private PersistenceResult forceExportModule(IProject project, String moduleFqn)
+    {
+        PersistenceResult result = new PersistenceResult();
+        long start = System.currentTimeMillis();
+
+        if (project == null || moduleFqn == null || moduleFqn.isEmpty())
+        {
+            result.ok = false;
+            result.detail = "skipped: project or moduleFqn unavailable"; //$NON-NLS-1$
+            result.elapsedMs = System.currentTimeMillis() - start;
+            return result;
+        }
+
+        IBmModelManager mgr = Activator.getDefault().getBmModelManager();
+        if (mgr == null)
+        {
+            result.ok = false;
+            result.detail = "skipped: IBmModelManager not available"; //$NON-NLS-1$
+            result.elapsedMs = System.currentTimeMillis() - start;
+            return result;
+        }
+
+        BmExportHelper.Result r = BmExportHelper.forceExportAndWait(mgr, project, moduleFqn);
+        result.ok = r.isOk();
+        result.elapsedMs = r.totalMs;
+        if (r.error != null)
+        {
+            result.detail = r.error;
+        }
+        else if (!r.waitComputationOk)
+        {
+            result.detail = "forceExport ok, waitComputation timed out (" //$NON-NLS-1$
+                + r.waitComputationMs + " ms)"; //$NON-NLS-1$
+        }
+        return result;
+    }
+
+    /**
+     * Collects EDT validation markers for the just-written module.
+     * <p>
+     * Resolves a target FQN to filter markers by {@code marker.getObjectPresentation()}.
+     * Uses {@code objectName} when supplied; otherwise infers from {@code modulePath}.
+     * Performs up to 3 short polls with 300ms sleep to allow EDT to publish markers
+     * after the file write.
+     */
+    private FileMarkers.Grouped collectValidation(IProject project,
+        String objectName, String modulePath)
+    {
+        try
+        {
+            IMarkerManager markerManager = Activator.getDefault().getMarkerManager();
+            if (markerManager == null)
+            {
+                return null;
+            }
+
+            String fqn = resolveFqnForValidation(objectName, modulePath);
+            if (fqn == null || fqn.isEmpty())
+            {
+                return null;
+            }
+
+            // Up to 3 polls to give EDT time to refresh markers after disk write
+            List<FileMarkers.MarkerInfo> markers = null;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (attempt > 0)
+                {
+                    try
+                    {
+                        Thread.sleep(300);
+                    }
+                    catch (InterruptedException ie)
+                    {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+                markers = FileMarkers.getMarkersByObjectPresentation(
+                    markerManager, project, fqn, null, 200);
+                if (!markers.isEmpty())
+                {
+                    break;
+                }
+            }
+            return FileMarkers.groupBySeverity(markers != null ? markers : new ArrayList<>());
+        }
+        catch (Exception e)
+        {
+            Activator.logWarning("validateAfterWrite skipped: " + e.getMessage()); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /**
+     * Builds a marker-filter FQN. Prefers {@code objectName} (e.g. "Document.MyDoc"),
+     * falls back to inferring "Type.Name" from {@code modulePath}
+     * (e.g. "Documents/MyDoc/ObjectModule.bsl" -> "Document.MyDoc").
+     */
+    private String resolveFqnForValidation(String objectName, String modulePath)
+    {
+        if (objectName != null && !objectName.isEmpty())
+        {
+            return objectName;
+        }
+        if (modulePath == null || modulePath.isEmpty())
+        {
+            return null;
+        }
+        String[] parts = modulePath.replace('\\', '/').split("/"); //$NON-NLS-1$
+        if (parts.length < 2)
+        {
+            return null;
+        }
+        String dirName = parts[0];
+        String namePart = parts[1];
+        String typePart = MetadataTypeUtils.getTypeByDirectoryName(dirName);
+        if (typePart == null)
+        {
+            return null;
+        }
+        return typePart + "." + namePart; //$NON-NLS-1$
+    }
+
+    private String buildValidationHint(FileMarkers.Grouped g)
+    {
+        if (g.isEmpty())
+        {
+            return "No problems found"; //$NON-NLS-1$
+        }
+        StringBuilder sb = new StringBuilder();
+        if (g.errorCount() > 0)
+        {
+            sb.append(g.errorCount()).append(" error(s) - must fix before continuing. "); //$NON-NLS-1$
+        }
+        if (g.warningCount() > 0)
+        {
+            sb.append(g.warningCount()).append(" warning(s) - review and decide. "); //$NON-NLS-1$
+        }
+        if (g.codeStyleCount() > 0)
+        {
+            sb.append(g.codeStyleCount()).append(" style hint(s) - optional. "); //$NON-NLS-1$
+        }
+        return sb.toString().trim();
+    }
+
+    private void appendValidationSection(StringBuilder body, FileMarkers.Grouped g)
+    {
+        if (g.isEmpty())
+        {
+            body.append("\n\n## Validation\n\nNo problems found."); //$NON-NLS-1$
+            return;
+        }
+        body.append("\n\n## Validation\n"); //$NON-NLS-1$
+        appendMarkerList(body, "Errors", g.errors); //$NON-NLS-1$
+        appendMarkerList(body, "Warnings", g.warnings); //$NON-NLS-1$
+        appendMarkerList(body, "Code style", g.codeStyle); //$NON-NLS-1$
+    }
+
+    private void appendMarkerList(StringBuilder body, String title,
+        List<FileMarkers.MarkerInfo> list)
+    {
+        if (list.isEmpty())
+        {
+            return;
+        }
+        body.append("\n### ").append(title).append(" (").append(list.size()).append(")\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        for (FileMarkers.MarkerInfo m : list)
+        {
+            body.append("- "); //$NON-NLS-1$
+            if (m.line > 0)
+            {
+                body.append("L").append(m.line).append(" "); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            body.append(m.message);
+            if (m.checkId != null && !m.checkId.isEmpty())
+            {
+                body.append(" `").append(m.checkId).append("`"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            body.append("\n"); //$NON-NLS-1$
         }
     }
 

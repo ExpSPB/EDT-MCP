@@ -2,7 +2,7 @@ Manifest-Version: 1.0
 Bundle-ManifestVersion: 2
 Bundle-Name: %pluginName
 Bundle-Vendor: %providerName
-Bundle-Version: 1.30.0.qualifier
+Bundle-Version: 1.38.0.qualifier
 Bundle-SymbolicName: com.ditrix.edt.mcp.server;singleton:=true
 Bundle-Activator: com.ditrix.edt.mcp.server.Activator
 Bundle-ActivationPolicy: lazy
@@ -73,4 +73,6 @@ Import-Package: com._1c.g5.v8.bm.common.collections,
  org.eclipse.ui.navigator,
  org.eclipse.xtext.resource,
  com._1c.g5.v8.dt.ql.resource,
- com._1c.g5.v8.dt.ql.dcs.resource
+ com._1c.g5.v8.dt.ql.dcs.resource,
+ com._1c.g5.v8.dt.dcs.util;resolution:=optional,
+ org.osgi.framework
