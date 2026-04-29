@@ -133,4 +133,97 @@ public final class BmTemplateHelper
                 ? "Spreadsheet API discovered: " + resolved //$NON-NLS-1$
                 : "Spreadsheet API NOT reachable in this EDT version."); //$NON-NLS-1$
     }
+
+    // -----------------------------------------------------------------------
+    // 1.40: Template type resolution + cell-level operations
+    // -----------------------------------------------------------------------
+
+    /**
+     * Maps an English/Russian template-type alias to its canonical EDT enum
+     * literal name. Used by {@code addTemplate} when setting Template.templateType.
+     */
+    public static String canonicalTemplateType(String alias)
+    {
+        if (alias == null || alias.isEmpty())
+        {
+            return "SpreadsheetDocument"; // default - matches upstream
+        }
+        String key = alias.trim().toLowerCase(java.util.Locale.ROOT);
+        switch (key)
+        {
+            case "spreadsheet":
+            case "spreadsheetdocument":
+            case "табличный":
+            case "табличныйдокумент":
+                return "SpreadsheetDocument";
+            case "text":
+            case "textdocument":
+            case "текстовый":
+            case "текстовыйдокумент":
+                return "TextDocument";
+            case "dcs":
+            case "datacompositionschema":
+            case "скд":
+            case "схемакомпоновкиданных":
+                return "DataCompositionSchema";
+            case "appearancetemplate":
+            case "datacompositionappearancetemplate":
+            case "макетоформления":
+                return "DataCompositionAppearanceTemplate";
+            case "binarydata":
+            case "binary":
+            case "двоичныеданные":
+                return "BinaryData";
+            case "html":
+            case "htmldocument":
+                return "HTMLDocument";
+            case "geographicschema":
+            case "geo":
+            case "географическая":
+            case "географическаясхема":
+                return "GeographicalSchema";
+            case "graphicalschema":
+            case "graph":
+            case "графическая":
+            case "графическаясхема":
+                return "GraphicalSchema";
+            case "activedocument":
+            case "active":
+            case "активныйдокумент":
+                return "ActiveDocument";
+            case "addin":
+            case "externalcomponent":
+            case "внешняякомпонента":
+                return "AddIn";
+            default:
+                return alias; // pass through, EDT will reject if invalid
+        }
+    }
+
+    /**
+     * Cell-level operations status: {@code true} when the layout service is
+     * reachable on this EDT build, {@code false} when only structural
+     * (Template.mdo creation) is supported.
+     */
+    public static boolean cellOpsAvailable()
+    {
+        return resolvedLayoutServiceClass() != null;
+    }
+
+    /**
+     * Builds an {@code mxlApiNotFound} error tag - graceful fallback when
+     * cell-level ops are unreachable.
+     */
+    public static MetadataGuards.BlockedGuardException mxlApiNotFound(String op)
+    {
+        java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("operation", op);
+        data.put("missingApi", "ITemplateLayoutService / SpreadsheetDocument");
+        return new MetadataGuards.BlockedGuardException(MetadataGuards.Verdict.block(
+            "Cell-level template operation '" + op + "' requires the EDT spreadsheet layout service "
+                + "which is not available on this build.",
+            "Open the template in the EDT GUI spreadsheet editor for cell-level changes. "
+                + "Headless cell ops will be enabled when this EDT build exposes the layout service.",
+            new MetadataGuards.ErrorTag("mxlApiNotFound", data))); //$NON-NLS-1$
+    }
 }

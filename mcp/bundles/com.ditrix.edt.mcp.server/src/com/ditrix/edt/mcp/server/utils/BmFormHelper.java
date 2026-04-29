@@ -32,7 +32,7 @@ import com.ditrix.edt.mcp.server.Activator;
  * Version-guard: {@link #init()} catches {@link ClassNotFoundException}, logs a warning,
  * and returns {@code false} if EDT form model classes are not available.
  * <p>
- * Based on the proven RSV BmFormHelper pattern for real EDT compatibility.
+ * Based on a proven BmFormHelper pattern for real EDT compatibility.
  */
 public class BmFormHelper
 {

@@ -2,10 +2,19 @@
 setlocal enabledelayedexpansion
 
 rem EDT MCP Server Plugin build script
-rem Usage: build.cmd [EDT_INSTALL_DIR]
-rem Example: build.cmd "C:\Program Files\1C\1CE\components\1c-edt-2025.1.5+34-x86_64"
+rem Usage: build.cmd [EDT_INSTALL_DIR] [extra mvn args]
+rem Example: build.cmd "C:\Program Files\1C\1CE\components\1c-edt-2025.2.3+30-x86_64"
+rem Example: build.cmd "" -DskipTests=false
 rem
-rem If EDT_INSTALL_DIR is not passed, the script tries to auto-detect it.
+rem If EDT_INSTALL_DIR is empty or omitted, the script auto-detects it.
+rem
+rem Optional environment variables:
+rem   MVN_HOME           - path to a Maven installation root (uses %MVN_HOME%\bin\mvn).
+rem   MVN_EXEC           - explicit path to mvn or mvn.cmd executable.
+rem   JAVA_HOME          - JDK 17 root. If not set the script looks under
+rem                        "C:\Program Files\Zulu\zulu-17".
+rem   EDT_MCP_SKIP_TESTS - set to 0 to enable Tycho tests (default: skipped
+rem                        because the test fragment needs a live SWT runtime).
 
 set "TARGET_FILE=%~dp0mcp\targets\default\default.target"
 set "BACKUP_FILE=%~dp0mcp\targets\default\default.target.bak"
@@ -32,15 +41,54 @@ if not exist "%EDT_DIR%\plugins" (
 
 echo Using EDT: %EDT_DIR%
 
+rem Auto-detect JAVA_HOME if not set
+if "%JAVA_HOME%"=="" (
+    if exist "C:\Program Files\Zulu\zulu-17" set "JAVA_HOME=C:\Program Files\Zulu\zulu-17"
+)
+if "%JAVA_HOME%"=="" (
+    echo ERROR: JAVA_HOME not set and "C:\Program Files\Zulu\zulu-17" missing.
+    echo Set JAVA_HOME to a JDK 17 root and retry.
+    exit /b 1
+)
+echo Using JDK:  %JAVA_HOME%
+
+rem Resolve mvn executable
+if "%MVN_EXEC%"=="" (
+    if not "%MVN_HOME%"=="" set "MVN_EXEC=%MVN_HOME%\bin\mvn"
+)
+if "%MVN_EXEC%"=="" (
+    where mvn >nul 2>&1 && set "MVN_EXEC=mvn"
+)
+if "%MVN_EXEC%"=="" (
+    echo ERROR: mvn not found in PATH and neither MVN_EXEC nor MVN_HOME is set.
+    echo Set MVN_HOME ^(e.g. C:\apache-maven-3.9.9^) and retry.
+    exit /b 1
+)
+echo Using mvn:  %MVN_EXEC%
+
 rem Backup original target
 copy /y "%TARGET_FILE%" "%BACKUP_FILE%" >nul
 
 rem Insert Directory location before </locations>
-powershell -Command "(Get-Content '%TARGET_FILE%' -Raw) -replace '</locations>', ('<!-- EDT Runtime (auto-added by build script) -->' + [Environment]::NewLine + '<location path=\"%EDT_DIR%\" type=\"Directory\"/>' + [Environment]::NewLine + [Environment]::NewLine + '</locations>') | Set-Content '%TARGET_FILE%' -NoNewline"
+powershell -NoProfile -Command "(Get-Content '%TARGET_FILE%' -Raw) -replace '</locations>', ('<!-- EDT Runtime (auto-added by build script) -->' + [Environment]::NewLine + '<location path=\"%EDT_DIR%\" type=\"Directory\"/>' + [Environment]::NewLine + [Environment]::NewLine + '</locations>') | Set-Content '%TARGET_FILE%' -NoNewline"
 
-echo Building...
+rem Decide whether to skip tests (Tycho test fragment needs SWT runtime that
+rem headless build does not provide).
+set "SKIP_TESTS_ARG=-DskipTests"
+if "%EDT_MCP_SKIP_TESTS%"=="0" set "SKIP_TESTS_ARG="
+
+shift
+set "EXTRA_MVN_ARGS="
+:collect_args
+if "%~1"=="" goto run_build
+set "EXTRA_MVN_ARGS=%EXTRA_MVN_ARGS% %~1"
+shift
+goto collect_args
+
+:run_build
+echo Building (mvn clean verify %SKIP_TESTS_ARG%%EXTRA_MVN_ARGS%) ...
 cd /d "%~dp0mcp"
-call mvn clean verify
+call "%MVN_EXEC%" clean verify %SKIP_TESTS_ARG%%EXTRA_MVN_ARGS%
 set "BUILD_RESULT=%ERRORLEVEL%"
 
 rem Restore original target
@@ -54,7 +102,7 @@ if %BUILD_RESULT%==0 (
     echo ZIP archive:    mcp\repositories\com.ditrix.edt.mcp.server.repository\target\*.zip
 ) else (
     echo.
-    echo BUILD FAILED
+    echo BUILD FAILED ^(exit %BUILD_RESULT%^)
 )
 
-exit /b %BUILD_RESULT%
+endlocal & exit /b %BUILD_RESULT%

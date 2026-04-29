@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 EDT MCP Server — Eclipse RCP plugin for 1C:EDT that implements the Model Context Protocol (MCP), enabling AI assistants to interact with EDT workspaces. Java 17, OSGi architecture, ~5K LOC.
 
 - **Plugin ID:** `com.ditrix.edt.mcp.server`
-- **Version:** 1.39.0-SNAPSHOT
-- **Target platform:** EDT 2025.2 (Ruby)
+- **Version:** 1.40.0-SNAPSHOT
+- **Target platform:** EDT 2026.1
 - **License:** EPL 2.0
 
 ## Critical Rules
@@ -49,7 +49,7 @@ No test suite in the repository. Manual testing via EDT workspace.
 
 - **IMcpTool** (`tools/IMcpTool.java`) — Interface all tools implement: `getName()`, `getDescription()`, `getInputSchema()`, `execute(params)`, `getResponseType()`.
 - **McpToolRegistry** (`tools/McpToolRegistry.java`) — Thread-safe singleton (ConcurrentHashMap). Tools register/unregister at runtime.
-- **26 tool implementations** in `tools/impl/` — each tool is a separate class. Response types: TEXT, JSON, or MARKDOWN. Includes 6 BSL module analysis tools (read_module_source, get_module_structure, list_modules, search_in_code, read_method_source, get_method_call_hierarchy).
+- **66+ tool implementations** in `tools/impl/` — each tool is a separate class. Response types: TEXT, JSON, or MARKDOWN. 1.40 adds `yaxunit_tests` (unified runner) and 7 OperationGroup classes in `tools/impl/groups/` for the future EditMetadataTool refactor.
 
 ### Major Features
 
@@ -85,7 +85,8 @@ All Java source is under `mcp/bundles/com.ditrix.edt.mcp.server/src/com/ditrix/e
 |---------|---------|
 | `(root)` | Activator, McpServer, UserSignal, ActiveToolCall |
 | `tools/` | IMcpTool, McpToolRegistry |
-| `tools/impl/` | 26 tool implementations |
+| `tools/impl/` | 66+ tool implementations |
+| `tools/impl/groups/` | 7 OperationGroup classes (1.40, edit_metadata refactor groundwork) |
 | `tools/metadata/` | Metadata formatting helpers |
 | `protocol/` | McpProtocolHandler, constants, JSON schema builder |
 | `protocol/jsonrpc/` | JSON-RPC request/response models |

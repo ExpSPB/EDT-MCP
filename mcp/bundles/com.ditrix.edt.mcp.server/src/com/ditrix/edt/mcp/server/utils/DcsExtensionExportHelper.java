@@ -32,7 +32,7 @@ import com.ditrix.edt.mcp.server.Activator;
 /**
  * Direct DCS save to disk for extension projects, working around the
  * EDT 2025.2 bug where built-in serialization silently drops .dcs writes
- * after the first one. Mirrors the RSV 3.7 pattern.
+ * after the first one. Mirrors the conventional pattern.
  * <p>
  * Pure reflection: optional Import-Package
  * {@code com._1c.g5.v8.dt.dcs.util}, {@code com._1c.g5.v8.dt.platform.version},

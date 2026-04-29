@@ -114,7 +114,7 @@ public class GetProjectErrorsTool implements IMcpTool
         List<String> objects = parseObjectsList(objectsJson);
 
         // Resolve scope: explicit "objects" => scope=object regardless of input.
-        // Default scope = "session" - matches RSV behaviour and avoids returning
+        // Default scope = "session" - matches conventional behaviour and avoids returning
         // thousands of pre-existing markers from a stock configuration.
         if (scope == null || scope.isEmpty())
         {

@@ -24,3 +24,13 @@ log.log
 /tests/e2e/*.xml
 
 /source
+
+# Local external plugin tooling scratch (not for commit)
+/EDT-RSV-MCP/
+$envC
+
+# Personal Telegram chat exports (do not commit - private data)
+/docs/edt-rsv-mcp/Telegram/
+
+# External plugin analysis (do not commit - internal scratch)
+/docs/edt-rsv-mcp/

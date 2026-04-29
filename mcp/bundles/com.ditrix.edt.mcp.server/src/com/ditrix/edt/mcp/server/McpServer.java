@@ -64,6 +64,7 @@ import com.ditrix.edt.mcp.server.tools.impl.GetMethodCallHierarchyTool;
 import com.ditrix.edt.mcp.server.tools.impl.ValidateQueryTool;
 import com.ditrix.edt.mcp.server.tools.impl.RenameMetadataObjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.RunYaxunitTestsTool;
+import com.ditrix.edt.mcp.server.tools.impl.YaxunitTestsTool;
 import com.ditrix.edt.mcp.server.tools.impl.SetBreakpointTool;
 import com.ditrix.edt.mcp.server.tools.impl.RemoveBreakpointTool;
 import com.ditrix.edt.mcp.server.tools.impl.ListBreakpointsTool;
@@ -233,6 +234,8 @@ public class McpServer
         registry.register(new UpdateDatabaseTool());
         registry.register(new DebugLaunchTool());
         registry.register(new ListConfigurationsTool());
+        // 1.40: unified yaxunit_tests + legacy run/debug as deprecated aliases
+        registry.register(new YaxunitTestsTool());
         registry.register(new RunYaxunitTestsTool());
 
         // Debug inspection tools (breakpoints + suspended state)

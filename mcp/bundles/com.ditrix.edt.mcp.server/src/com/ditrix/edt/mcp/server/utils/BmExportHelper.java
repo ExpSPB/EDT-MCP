@@ -21,7 +21,7 @@ import com.ditrix.edt.mcp.server.Activator;
  * Generalized BM persistence helper. Wraps
  * {@code IBmModelManager.forceExport(IDtProject, List<String>)} with a
  * subsequent {@code waitComputation()} on the EXP_O / EXP_B / FORM_EXT
- * derived-data segments, mirroring the contract decompiled from RSV's own
+ * derived-data segments, mirroring a known upstream contract
  * helper.
  * <p>
  * Used by every tool that mutates the BM model:
@@ -37,7 +37,7 @@ public final class BmExportHelper
 {
     /**
      * Derived-data segment names expected after a write. Discovered from the
-     * decompiled RSV helper (BmExportHelper.DD_SEGMENT_*).
+     * reference upstream helper (BmExportHelper.DD_SEGMENT_*).
      */
     public static final String DD_SEGMENT_EXPORT_OBJECT = "EXP_O"; //$NON-NLS-1$
     public static final String DD_SEGMENT_EXPORT_BLOB = "EXP_B"; //$NON-NLS-1$

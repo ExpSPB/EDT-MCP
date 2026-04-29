@@ -196,30 +196,42 @@ public final class JsonUtils
      */
     public static boolean extractBooleanArgument(Map<String, String> params, String argumentName, boolean defaultValue)
     {
+        Boolean v = extractBooleanArgumentNullable(params, argumentName);
+        return v == null ? defaultValue : v;
+    }
+
+    /**
+     * 1.40: extracts a boolean argument that may be unset.
+     * Returns null when the parameter is missing or empty - useful for guards
+     * that need to distinguish "not specified" from "explicitly false".
+     *
+     * @param params       parameter map
+     * @param argumentName parameter name
+     * @return Boolean.TRUE / Boolean.FALSE / null (not specified)
+     */
+    public static Boolean extractBooleanArgumentNullable(Map<String, String> params, String argumentName)
+    {
         if (params == null || argumentName == null)
         {
-            return defaultValue;
+            return null;
         }
-        
         String value = params.get(argumentName);
         if (value == null || value.isEmpty())
         {
-            return defaultValue;
+            return null;
         }
-        
         value = value.trim().toLowerCase();
         if ("true".equals(value) || "1".equals(value) || "yes".equals(value)) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         {
-            return true;
+            return Boolean.TRUE;
         }
-        else if ("false".equals(value) || "0".equals(value) || "no".equals(value)) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if ("false".equals(value) || "0".equals(value) || "no".equals(value)) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         {
-            return false;
+            return Boolean.FALSE;
         }
-        
-        return defaultValue;
+        return null;
     }
-    
+
     /**
      * Extracts a long argument from params map.
      * Handles JSON number strings like "42.0" by parsing via double first.

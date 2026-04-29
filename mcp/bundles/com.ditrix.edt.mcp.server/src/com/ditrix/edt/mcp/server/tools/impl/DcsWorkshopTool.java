@@ -31,7 +31,7 @@ import com.ditrix.edt.mcp.server.utils.MetadataGuards;
 import com.ditrix.edt.mcp.server.utils.QlValidator;
 
 /**
- * DCS schema constructor — наш аналог RSV {@code edit_metadata} DCS group,
+ * DCS schema constructor — наш {@code edit_metadata} DCS group,
  * как отдельный per-domain tool (см. план 1.35-1.36).
  * <p>
  * <b>1.35:</b> 10 functional operations + help. Auto-validation запросов через
@@ -471,7 +471,7 @@ public class DcsWorkshopTool implements IMcpTool
         {
             throw notFoundTag(name, "parameter"); //$NON-NLS-1$
         }
-        // Name change is intentionally ignored (RSV behavior).
+        // Name change is intentionally ignored (matching conventional behavior).
         applyParameterFields(parameter, params);
         return name + " updated"; //$NON-NLS-1$
     }
@@ -646,7 +646,7 @@ public class DcsWorkshopTool implements IMcpTool
         String conditionValue = JsonUtils.extractStringArgument(params, "conditionValue"); //$NON-NLS-1$
         // Appearance properties are received as a string in 1.37: "Font=Arial,12,bold;TextColor=#FF0000".
         // The font/color guard rejects values that look like JSON objects/arrays
-        // (RSV's lesson: agents often send {"bold": true} which corrupts MXL).
+        // (lesson learned: agents often send {"bold": true} which corrupts MXL).
         String appearanceSpec = JsonUtils.extractStringArgument(params, "appearance"); //$NON-NLS-1$
         String appearanceTrim = appearanceSpec != null ? appearanceSpec.trim() : null;
         if (appearanceTrim != null

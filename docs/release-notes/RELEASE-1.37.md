@@ -1,6 +1,6 @@
 # EDT-MCP 1.37 — Inventory closeout + deferred features merge
 
-Production-ready release: closes RSV 3.7 inventory gaps and merges all
+Production-ready release: closes the extension framework parity gaps and merges all
 previously deferred 1.36 / 1.37+ features into a single drop. Tool count
 unchanged at 57.
 
@@ -21,7 +21,7 @@ Tags surfaced:
 - `queryValidation` / `expressionValidation` — Xtext-based DCS query and
   expression validation.
 - `fontColorGuard` — appearance value passed as JSON object/array instead
-  of `Name=Value` string (RSV's lesson).
+  of `Name=Value` string (lesson learned from upstream tooling).
 - `mxlApiNotFound` / `adoptServiceNotFound` / `exportServiceNotFound` —
   EDT API not reachable in this version.
 - `autoBorrowed` / `autoBorrowSkipped` — extension auto-borrow telemetry.

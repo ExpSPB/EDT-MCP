@@ -547,4 +547,140 @@ public final class BmObjectHelper
             "Verify the name and try again.", //$NON-NLS-1$
             new MetadataGuards.ErrorTag("notFound", data))); //$NON-NLS-1$
     }
+
+    // -----------------------------------------------------------------------
+    // 1.40: Idempotency property comparison
+    // -----------------------------------------------------------------------
+
+    /**
+     * Compares the requested properties against the existing object's getters
+     * via reflection. Returns a list of mismatch records (one per non-matching
+     * property) or an empty list when every requested property matches.
+     * <p>
+     * Property names are EMF/JavaBean style ({@code lengthOfDescription},
+     * {@code hierarchical}, {@code type}, ...). Values are stringified via
+     * {@code toString()} for comparison - sufficient for primitives, enums and
+     * String-valued properties. For deep type compositions use specific
+     * comparators outside this helper.
+     *
+     * @param existing  the object found in the model (must not be null)
+     * @param requested map propertyName -&gt; requested-value-as-string (case-sensitive on key)
+     * @return list of mismatch records, each shaped
+     *         {@code {name, requested, existing}} - never null
+     */
+    public static java.util.List<Map<String, Object>> compareProperties(MdObject existing,
+        Map<String, String> requested)
+    {
+        java.util.List<Map<String, Object>> mismatches = new java.util.ArrayList<>();
+        if (existing == null || requested == null || requested.isEmpty())
+        {
+            return mismatches;
+        }
+        for (Map.Entry<String, String> entry : requested.entrySet())
+        {
+            String name = entry.getKey();
+            String requestedValue = entry.getValue();
+            if (name == null || name.isEmpty())
+            {
+                continue;
+            }
+            String existingValue = readProperty(existing, name);
+            if (existingValue == null && requestedValue == null)
+            {
+                continue;
+            }
+            if (existingValue != null && existingValue.equals(requestedValue))
+            {
+                continue;
+            }
+            // case-insensitive equality for boolean/enum-like strings
+            if (existingValue != null && requestedValue != null
+                && existingValue.equalsIgnoreCase(requestedValue))
+            {
+                continue;
+            }
+            Map<String, Object> mm = new LinkedHashMap<>();
+            mm.put("name", name); //$NON-NLS-1$
+            mm.put("requested", requestedValue == null ? "" : requestedValue); //$NON-NLS-1$ //$NON-NLS-2$
+            mm.put("existing", existingValue == null ? "" : existingValue); //$NON-NLS-1$ //$NON-NLS-2$
+            mismatches.add(mm);
+        }
+        return mismatches;
+    }
+
+    /**
+     * Reads a property by JavaBean getter via reflection. Returns the value
+     * stringified via {@code toString()}, or {@code null} when no matching
+     * getter exists or the value is null.
+     */
+    private static String readProperty(Object obj, String propertyName)
+    {
+        if (obj == null || propertyName == null || propertyName.isEmpty())
+        {
+            return null;
+        }
+        String capName = Character.toUpperCase(propertyName.charAt(0)) + propertyName.substring(1);
+        // Try get<Name>() and is<Name>() (boolean)
+        for (String prefix : new String[] { "get", "is" })
+        {
+            try
+            {
+                Method m = obj.getClass().getMethod(prefix + capName);
+                Object result = m.invoke(obj);
+                return result == null ? null : result.toString();
+            }
+            catch (NoSuchMethodException ignored)
+            {
+                // try next
+            }
+            catch (Exception e)
+            {
+                Activator.logWarning("readProperty " + propertyName + " failed: " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Builds a {@code propertyMismatch} {@link MetadataGuards.BlockedGuardException}
+     * for use in idempotent mutation lambdas: when an existing object is found
+     * AND its actual properties differ from the requested ones, throw this
+     * exception instead of {@link #alreadyExists(String, String, String)}.
+     * <p>
+     * The resulting tag carries {@code mismatches=[{name,requested,existing}]}
+     * plus context fields - AI agents branch on it to call
+     * {@code setObjectProperty} for each diff and re-run.
+     */
+    public static MetadataGuards.BlockedGuardException propertyMismatch(String childName,
+        String ownerFqn, String kind, java.util.List<Map<String, Object>> mismatches)
+    {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("name", childName); //$NON-NLS-1$
+        data.put("ownerFqn", ownerFqn); //$NON-NLS-1$
+        data.put("kind", kind); //$NON-NLS-1$
+        data.put("mismatches", mismatches); //$NON-NLS-1$
+        return new MetadataGuards.BlockedGuardException(MetadataGuards.Verdict.block(
+            kind + " '" + childName + "' already exists with different properties.", //$NON-NLS-1$ //$NON-NLS-2$
+            "Use setObjectProperty to update each mismatching property, or remove the object and recreate.", //$NON-NLS-1$
+            new MetadataGuards.ErrorTag("propertyMismatch", data))); //$NON-NLS-1$
+    }
+
+    /**
+     * Builds a {@code idempotentSkip} success-style tag (not an exception):
+     * surface this in the mutation lambda's return value to indicate
+     * "object already exists with matching properties - nothing to do".
+     * <p>
+     * Caller does NOT throw; instead returns the result string and adds the
+     * tag to {@link Result#tags} after the lambda completes successfully.
+     */
+    public static Map<String, Object> idempotentSkipTag(String childName, String ownerFqn,
+        String kind)
+    {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("name", childName); //$NON-NLS-1$
+        data.put("ownerFqn", ownerFqn); //$NON-NLS-1$
+        data.put("kind", kind); //$NON-NLS-1$
+        return data;
+    }
 }
