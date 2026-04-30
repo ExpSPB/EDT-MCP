@@ -26,6 +26,9 @@ import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
 import com.ditrix.edt.mcp.server.tools.impl.GetBookmarksTool;
 import com.ditrix.edt.mcp.server.tools.impl.DebugLaunchTool;
 import com.ditrix.edt.mcp.server.tools.impl.FindReferencesTool;
+import com.ditrix.edt.mcp.server.tools.impl.GenerateHealthSnapshotTool;
+import com.ditrix.edt.mcp.server.tools.impl.CodeTemplateTool;
+import com.ditrix.edt.mcp.server.tools.impl.ExtensionLifecycleTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetApplicationsTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetCheckDescriptionTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetConfigurationPropertiesTool;
@@ -293,6 +296,11 @@ public class McpServer
         registry.register(new FindRlsViolationsTool());
         registry.register(new SensitiveDataScanTool());
         registry.register(new GenerateEventHandlersTool());
+
+        // 1.40.x AI-agent tools
+        registry.register(new GenerateHealthSnapshotTool());
+        registry.register(new CodeTemplateTool());
+        registry.register(new ExtensionLifecycleTool());
 
         Activator.logInfo("Registered " + registry.getToolCount() + " MCP tools"); //$NON-NLS-1$ //$NON-NLS-2$
     }

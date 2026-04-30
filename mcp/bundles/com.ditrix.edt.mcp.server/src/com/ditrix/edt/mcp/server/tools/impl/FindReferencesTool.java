@@ -12,7 +12,6 @@ import java.util.Collection;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.NullProgressMonitor;
@@ -21,8 +20,6 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
-import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.PlatformUI;
 import org.eclipse.xtext.resource.IReferenceDescription;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.ui.editor.findrefs.IReferenceFinder;
@@ -49,7 +46,9 @@ import com._1c.g5.v8.dt.metadata.mdtype.MdTypes;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
+import com.ditrix.edt.mcp.server.utils.PendingReferencesRegistry;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
+import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 
 /**
@@ -95,6 +94,28 @@ public class FindReferencesTool implements IMcpTool
                 "the specific kind (Object, Reference, Selection, Manager, Cache, List) " + //$NON-NLS-1$
                 "based on its EClass. Default: false. " + //$NON-NLS-1$
                 "Useful for refactoring impact analysis.") //$NON-NLS-1$
+            .booleanProperty("skipBsl", //$NON-NLS-1$
+                "1.40.6: Skip BSL code search (the slowest phase). Returns metadata-only "
+                + "references in seconds. Use when you only need to refactor metadata or "
+                + "the BSL search times out on large objects (e.g. Catalog.Сотрудники). "
+                + "Default: false.")
+            .booleanProperty("bslOnly", //$NON-NLS-1$
+                "1.40.6: Search only BSL code, skip metadata back-references. Inverse of "
+                + "skipBsl. Default: false.")
+            .stringProperty("categories", //$NON-NLS-1$
+                "1.40.6: Comma-separated whitelist of categories to collect. Available: "
+                + "back (direct back references), produced (produced types), predefined "
+                + "(predefined items), fields (attribute/dimension references), bsl "
+                + "(BSL code). Default: empty = all enabled.")
+            .stringProperty("timeoutSeconds", //$NON-NLS-1$
+                "1.40.x: Soft timeout in seconds before returning Pending JSON "
+                + "with a runKey. Default: 30. Calling again with the same "
+                + "params resumes waiting (no duplicate work).")
+            .stringProperty("runKey", //$NON-NLS-1$
+                "1.40.x: Resume polling a previously-issued search. Pass the "
+                + "runKey returned by an earlier Pending response; other "
+                + "params are ignored. Returns the result if ready, or another "
+                + "Pending JSON.")
             .build();
     }
     
@@ -119,10 +140,20 @@ public class FindReferencesTool implements IMcpTool
     @Override
     public String execute(Map<String, String> params)
     {
+        // 1.40.x: explicit retry mode - poll an existing runKey
+        String runKeyParam = JsonUtils.extractStringArgument(params, "runKey"); //$NON-NLS-1$
+        if (runKeyParam != null && !runKeyParam.isEmpty())
+        {
+            return resumePending(runKeyParam, params);
+        }
+
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String objectFqn = JsonUtils.extractStringArgument(params, "objectFqn"); //$NON-NLS-1$
         String limitStr = JsonUtils.extractStringArgument(params, "limit"); //$NON-NLS-1$
         boolean deep = JsonUtils.extractBooleanArgument(params, "deep", false); //$NON-NLS-1$
+        boolean skipBsl = JsonUtils.extractBooleanArgument(params, "skipBsl", false); //$NON-NLS-1$
+        boolean bslOnly = JsonUtils.extractBooleanArgument(params, "bslOnly", false); //$NON-NLS-1$
+        String categoriesCsv = JsonUtils.extractStringArgument(params, "categories"); //$NON-NLS-1$
 
         // Validate required parameters
         if (projectName == null || projectName.isEmpty())
@@ -132,6 +163,10 @@ public class FindReferencesTool implements IMcpTool
         if (objectFqn == null || objectFqn.isEmpty())
         {
             return "Error: objectFqn is required"; //$NON-NLS-1$
+        }
+        if (skipBsl && bslOnly)
+        {
+            return "Error: skipBsl and bslOnly are mutually exclusive"; //$NON-NLS-1$
         }
 
         int limit = 100;
@@ -147,33 +182,195 @@ public class FindReferencesTool implements IMcpTool
             }
         }
 
-        // Execute on UI thread
-        AtomicReference<String> resultRef = new AtomicReference<>();
+        // Build category filter set (1.40.6)
+        CategoryFilter filter = CategoryFilter.from(categoriesCsv, skipBsl, bslOnly);
+
+        // Compute runKey for the cache (1.40.x Pending mechanism)
+        String runKey = PendingReferencesRegistry.computeRunKey(projectName, objectFqn,
+            categoriesCsv, skipBsl, bslOnly, limit, deep);
+
+        long timeoutMs = parseTimeoutMs(params, 30_000L);
+
         final int maxResults = limit;
         final boolean deepFinal = deep;
+        PendingReferencesRegistry registry = PendingReferencesRegistry.getInstance();
+        registry.pruneExpired();
 
-        Display display = PlatformUI.getWorkbench().getDisplay();
-        display.syncExec(() -> {
-            try
-            {
-                String result = findReferencesInternal(projectName, objectFqn, maxResults, deepFinal);
-                resultRef.set(result);
-            }
-            catch (Exception e)
-            {
-                Activator.logError("Error finding references", e); //$NON-NLS-1$
-                resultRef.set("Error: " + e.getMessage()); //$NON-NLS-1$
-            }
-        });
+        // Look up or kick off the async search
+        PendingReferencesRegistry.PendingEntry entry = registry.getOrStart(runKey,
+            () -> findReferencesInternal(projectName, objectFqn, maxResults, deepFinal, filter));
 
-        return resultRef.get();
+        String result = entry.await(timeoutMs);
+        if (result != null)
+        {
+            // Done - return result and free the cache slot
+            registry.remove(runKey);
+            return result;
+        }
+        // Soft timeout - return Pending JSON for the AI to retry
+        return buildPendingJson(runKey, entry, projectName, objectFqn, filter, timeoutMs);
+    }
+
+    /**
+     * 1.40.x: resumes polling for a previously-issued runKey. Returns either
+     * the cached result (and removes the entry) or a fresh Pending JSON.
+     */
+    private String resumePending(String runKey, Map<String, String> params)
+    {
+        PendingReferencesRegistry registry = PendingReferencesRegistry.getInstance();
+        registry.pruneExpired();
+        PendingReferencesRegistry.PendingEntry entry = registry.get(runKey);
+        if (entry == null)
+        {
+            return ToolResult.error("runKey not found - the search either completed and "
+                + "was already retrieved, or was abandoned and evicted by TTL. "
+                + "Issue a new request without runKey to start over.")
+                .put("operation", NAME)
+                .put("runKey", runKey)
+                .toJson();
+        }
+        long timeoutMs = parseTimeoutMs(params, 30_000L);
+        String result = entry.await(timeoutMs);
+        if (result != null)
+        {
+            registry.remove(runKey);
+            return result;
+        }
+        return buildPendingJson(runKey, entry, null, null, null, timeoutMs);
+    }
+
+    private long parseTimeoutMs(Map<String, String> params, long defaultMs)
+    {
+        String t = JsonUtils.extractStringArgument(params, "timeoutSeconds"); //$NON-NLS-1$
+        if (t == null || t.isEmpty())
+        {
+            return defaultMs;
+        }
+        try
+        {
+            int seconds = Math.max(1, (int) Double.parseDouble(t));
+            return Math.min(seconds * 1000L, 5 * 60_000L); // hard cap 5 min
+        }
+        catch (NumberFormatException e)
+        {
+            return defaultMs;
+        }
+    }
+
+    private String buildPendingJson(String runKey, PendingReferencesRegistry.PendingEntry entry,
+        String projectName, String objectFqn, CategoryFilter filter, long timeoutMs)
+    {
+        ToolResult tr = ToolResult.success()
+            .put("operation", NAME)
+            .put("status", "Pending")
+            .put("runKey", runKey)
+            .put("elapsedMs", entry.elapsedMs())
+            .put("waitedMs", timeoutMs)
+            .put("hint", "Search still running. Call this tool again with runKey=\"" + runKey
+                + "\" to resume waiting (or with the same projectName/objectFqn/filters - "
+                + "same params produce the same runKey). Add skipBsl=true to drop the slow "
+                + "BSL phase.");
+        if (projectName != null)
+        {
+            tr.put("projectName", projectName);
+        }
+        if (objectFqn != null)
+        {
+            tr.put("objectFqn", objectFqn);
+        }
+        return tr.toJson();
+    }
+
+    /**
+     * 1.40.6: Filter for selectively collecting reference categories.
+     * <p>
+     * Built from {@code categories=...} CSV plus the {@code skipBsl} /
+     * {@code bslOnly} convenience flags. When no flag/category is set, every
+     * category is enabled (backward-compat with the original tool surface).
+     */
+    static final class CategoryFilter
+    {
+        boolean back = true;
+        boolean produced = true;
+        boolean predefined = true;
+        boolean fields = true;
+        boolean bsl = true;
+
+        static CategoryFilter from(String csv, boolean skipBsl, boolean bslOnly)
+        {
+            CategoryFilter f = new CategoryFilter();
+            if (csv != null && !csv.isEmpty())
+            {
+                f.back = false;
+                f.produced = false;
+                f.predefined = false;
+                f.fields = false;
+                f.bsl = false;
+                for (String token : csv.split("\\s*,\\s*"))
+                {
+                    switch (token.toLowerCase(java.util.Locale.ROOT))
+                    {
+                        case "back":
+                            f.back = true;
+                            break;
+                        case "produced":
+                            f.produced = true;
+                            break;
+                        case "predefined":
+                            f.predefined = true;
+                            break;
+                        case "fields":
+                            f.fields = true;
+                            break;
+                        case "bsl":
+                            f.bsl = true;
+                            break;
+                        case "metadata":
+                            // Convenience alias: everything except BSL
+                            f.back = true;
+                            f.produced = true;
+                            f.predefined = true;
+                            f.fields = true;
+                            break;
+                        default:
+                            // Unknown token - ignore silently to keep backward compat
+                            break;
+                    }
+                }
+            }
+            // Convenience flags override the CSV
+            if (skipBsl)
+            {
+                f.bsl = false;
+            }
+            if (bslOnly)
+            {
+                f.back = false;
+                f.produced = false;
+                f.predefined = false;
+                f.fields = false;
+                f.bsl = true;
+            }
+            return f;
+        }
+
+        boolean isAllDisabled()
+        {
+            return !back && !produced && !predefined && !fields && !bsl;
+        }
     }
 
     /**
      * Internal implementation that runs on UI thread.
      */
-    private String findReferencesInternal(String projectName, String objectFqn, int limit, boolean deep)
+    private String findReferencesInternal(String projectName, String objectFqn, int limit, boolean deep,
+        CategoryFilter filter)
     {
+        // 1.40.6: log the resolved filter so timeout reports include
+        // the active phases without the user having to repeat the call.
+        Activator.logInfo("find_references filter: back=" + filter.back //$NON-NLS-1$
+            + " produced=" + filter.produced + " predefined=" + filter.predefined //$NON-NLS-1$ //$NON-NLS-2$
+            + " fields=" + filter.fields + " bsl=" + filter.bsl); //$NON-NLS-1$ //$NON-NLS-2$
         // Normalize Russian metadata type names: "Справочник.Номенклатура" -> "Catalog.Номенклатура"
         objectFqn = MetadataTypeUtils.normalizeFqn(objectFqn);
 
@@ -227,9 +424,20 @@ public class FindReferencesTool implements IMcpTool
             return "Error: Object not found: " + objectFqn; //$NON-NLS-1$
         }
         
+        // 1.40.6: short-circuit on empty filter (avoid running BM transaction at all)
+        if (filter.isAllDisabled())
+        {
+            return "# References to " + objectFqn + "\n\n"
+                + "**No categories enabled - the filter combination disables every collector phase.**\n\n"
+                + "Common cause: `categories=\"bsl\"` combined with `skipBsl=true` cancels "
+                + "the only requested phase.\n\n"
+                + "Pass `categories=metadata,bsl` (or remove the categories/skipBsl/bslOnly "
+                + "flags) to collect references.\n";
+        }
+
         // Collect all references
-        ReferenceCollector collector = new ReferenceCollector(bmModel, targetObject, limit, deep);
-        
+        ReferenceCollector collector = new ReferenceCollector(bmModel, targetObject, limit, deep, filter);
+
         try
         {
             // Execute as BM task
@@ -242,7 +450,7 @@ public class FindReferencesTool implements IMcpTool
         }
         
         // Format output
-        return formatOutput(objectFqn, collector);
+        return formatOutput(objectFqn, collector, filter);
     }
     
     /**
@@ -269,14 +477,31 @@ public class FindReferencesTool implements IMcpTool
     /**
      * Formats output as markdown - sorted list similar to EDT.
      */
-    private String formatOutput(String objectFqn, ReferenceCollector collector)
+    private String formatOutput(String objectFqn, ReferenceCollector collector, CategoryFilter filter)
     {
         StringBuilder sb = new StringBuilder();
-        
+
         int totalCount = collector.getTotalCount();
-        
+
         sb.append("# References to ").append(objectFqn).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
         sb.append("**Total references found:** ").append(totalCount).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+        // 1.40.6: surface filter state so the reader knows which phases ran
+        if (!filter.bsl || !filter.back || !filter.produced || !filter.predefined || !filter.fields)
+        {
+            sb.append("> Active phases: "); //$NON-NLS-1$
+            java.util.List<String> active = new ArrayList<>();
+            if (filter.back) active.add("back"); //$NON-NLS-1$
+            if (filter.produced) active.add("produced"); //$NON-NLS-1$
+            if (filter.predefined) active.add("predefined"); //$NON-NLS-1$
+            if (filter.fields) active.add("fields"); //$NON-NLS-1$
+            if (filter.bsl) active.add("bsl"); //$NON-NLS-1$
+            sb.append(String.join(", ", active));
+            if (!filter.bsl)
+            {
+                sb.append(" *(BSL phase was skipped)*"); //$NON-NLS-1$
+            }
+            sb.append("\n\n"); //$NON-NLS-1$
+        }
         
         if (totalCount == 0)
         {
@@ -410,41 +635,59 @@ public class FindReferencesTool implements IMcpTool
         private final MdObject targetObject;
         private final int limit;
         private final boolean deep;
+        private final CategoryFilter filter;
         private final List<ReferenceInfo> references = new ArrayList<>();
         /** Set to track unique references (category:path:feature) to avoid duplicates */
         private final java.util.Set<String> seenReferences = new java.util.HashSet<>();
 
-        ReferenceCollector(IBmModel bmModel, MdObject targetObject, int limit, boolean deep)
+        ReferenceCollector(IBmModel bmModel, MdObject targetObject, int limit, boolean deep,
+            CategoryFilter filter)
         {
             super("Find references to " + targetObject.getName()); //$NON-NLS-1$
             this.bmModel = bmModel;
             this.targetObject = targetObject;
             this.limit = limit;
             this.deep = deep;
+            this.filter = filter;
         }
-        
+
         @Override
-        public Void execute(com._1c.g5.v8.bm.core.IBmTransaction transaction, 
+        public Void execute(com._1c.g5.v8.bm.core.IBmTransaction transaction,
                            org.eclipse.core.runtime.IProgressMonitor progressMonitor)
         {
             IBmEngine engine = bmModel.getEngine();
             IBmObject targetBmObject = (IBmObject) targetObject;
-            
+
             // 1. Collect direct back references
-            collectBackReferences(engine, targetBmObject);
-            
+            if (filter.back)
+            {
+                collectBackReferences(engine, targetBmObject);
+            }
+
             // 2. Collect references to produced types
-            collectProducedTypesReferences(engine, targetObject);
-            
+            if (filter.produced)
+            {
+                collectProducedTypesReferences(engine, targetObject);
+            }
+
             // 3. Collect references to predefined items
-            collectPredefinedItemsReferences(engine, targetObject);
-            
+            if (filter.predefined)
+            {
+                collectPredefinedItemsReferences(engine, targetObject);
+            }
+
             // 4. Collect references to fields (attributes, tabular sections, etc.)
-            collectFieldReferences(engine, targetObject);
-            
-            // 5. Collect BSL code references
-            collectBslReferences(targetBmObject);
-            
+            if (filter.fields)
+            {
+                collectFieldReferences(engine, targetObject);
+            }
+
+            // 5. Collect BSL code references (the slowest phase - skip via skipBsl=true)
+            if (filter.bsl)
+            {
+                collectBslReferences(targetBmObject);
+            }
+
             return null;
         }
         

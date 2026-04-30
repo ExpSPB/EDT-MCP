@@ -433,14 +433,22 @@ public class EditMetadataTool implements IMcpTool
             // ---- Form ops 1.40: implemented in this file ----
             case "listPictures": //$NON-NLS-1$
                 return opListPictures(params);
-            // ---- Form ops 1.40: deferred to a future patch (require BmFormHelper extensions) ----
-            case "addFormAttributeColumn": //$NON-NLS-1$
-            case "addDynamicListTable": //$NON-NLS-1$
+            // ---- Form ops 1.40.2: addRadioButton delegates to addField with elementType=RadioButton ----
             case "addRadioButton": //$NON-NLS-1$
+                return delegateToEditFormAsRadioButton(params);
+            // ---- Form ops 1.40: deferred to 1.41 (require BmFormHelper extensions) ----
+            case "addFormAttributeColumn": //$NON-NLS-1$
+                return ToolResult.error("addFormAttributeColumn lands in 1.41 (BmFormHelper extension for "
+                    + "FormAttribute.columns mutation pending). Workaround: open the form in EDT and "
+                    + "add the column via the table attribute editor.").toJson();
+            case "addDynamicListTable": //$NON-NLS-1$
+                return ToolResult.error("addDynamicListTable lands in 1.41 (combined "
+                    + "FormAttribute(DynamicList) + Table creation pending). Workaround: use addFormAttribute "
+                    + "with type=DynamicList, then addTable bound to that attribute.").toJson();
             case "setupSettingsComposerOnForm": //$NON-NLS-1$
-                return ToolResult.error("Form constructor operation '" + op //$NON-NLS-1$
-                    + "' lands in a follow-up 1.40.x patch (requires BmFormHelper extensions). " //$NON-NLS-1$
-                    + "For now use the EDT GUI for these specific scenarios.").toJson(); //$NON-NLS-1$
+                return ToolResult.error("setupSettingsComposerOnForm lands in 1.41 (multi-step scenario: "
+                    + "SettingsComposer attribute + UI tables + ExtInfo wiring). Workaround: use the EDT "
+                    + "GUI 'New form' wizard for reports - the wizard sets up the composer automatically.").toJson();
 
             // ---- Templates group 1.40 ----
             case "addTemplate": //$NON-NLS-1$
@@ -1262,9 +1270,9 @@ public class EditMetadataTool implements IMcpTool
     }
 
     /**
-     * 1.40: setRoleRight via {@link BmRightsHelper}. Surfaces a graceful
-     * {@code rightsApiNotFound} tag when the rights model is missing on this
-     * EDT build (rare).
+     * 1.40.1: setRoleRight - real mutation via {@link BmRightsHelper#setRight}.
+     * Probes the EDT rights model; falls back to a {@code partialMutation}
+     * tag when individual setters/factories are missing on this EDT build.
      */
     private String opSetRoleRight(Map<String, String> params)
     {
@@ -1290,28 +1298,73 @@ public class EditMetadataTool implements IMcpTool
         {
             return ToolResult.error("Project not found").toJson();
         }
-        // The actual mutation requires the rights model EObject graph; we
-        // probe via BmObjectHelper.executeWriteOnObject and surface the
-        // canonical right name + targets in the response. Full mutation
-        // wiring lands in 1.41 once BmRightsHelper supports the
-        // RoleDescription writer (depends on EDT rights API stabilization).
-        return ToolResult.success()
-            .put("operation", "setRoleRight")
+        java.util.concurrent.atomic.AtomicReference<BmRightsHelper.RightResult> ref
+            = new java.util.concurrent.atomic.AtomicReference<>();
+        BmObjectHelper.Result r = BmObjectHelper.executeWriteOnObject(project, roleFqn, dryRun,
+            (tx, owner) -> {
+                Configuration config = Activator.getDefault().getConfigurationProvider()
+                    .getConfiguration(project);
+                BmRightsHelper.RightResult rr = BmRightsHelper.setRight(owner, config,
+                    targetFqn, canonical, granted);
+                ref.set(rr);
+                if (!rr.ok)
+                {
+                    throw new RuntimeException(rr.error != null ? rr.error : "setRight failed");
+                }
+                if (rr.idempotentSkip)
+                {
+                    return "idempotentSkip: right already at requested value";
+                }
+                StringBuilder summary = new StringBuilder("Right '").append(canonical) //$NON-NLS-1$
+                    .append("' set to ").append(granted ? "granted" : "denied") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    .append(" via ").append(rr.setterMethod); //$NON-NLS-1$
+                if (rr.objectRightsCreated)
+                {
+                    summary.append("; ObjectRights entry created"); //$NON-NLS-1$
+                }
+                if (rr.rightCreated)
+                {
+                    summary.append("; Right entry created"); //$NON-NLS-1$
+                }
+                return summary.toString();
+            });
+
+        ToolResult tool = r.ok ? ToolResult.success()
+            : ToolResult.error(r.error != null ? r.error : "setRoleRight failed");
+        tool.put("operation", "setRoleRight")
             .put("roleFqn", roleFqn)
             .put("targetFqn", targetFqn)
             .put("rightName", rightAlias)
             .put("canonicalRightName", canonical)
             .put("requestedValue", granted)
-            .put("dryRun", dryRun)
-            .put("status", "ResolvedNoMutate")
-            .put("hint", "1.40: right-name resolution + RoleDescription navigation. "
-                + "Full mutation lands in 1.41 once the rights writer is wired in.")
-            .toJson();
+            .put("dryRun", dryRun);
+        if (ref.get() != null)
+        {
+            BmRightsHelper.RightResult rr = ref.get();
+            tool.put("idempotentSkip", rr.idempotentSkip)
+                .put("mutated", rr.mutated)
+                .put("rightCreated", rr.rightCreated)
+                .put("objectRightsCreated", rr.objectRightsCreated);
+            if (rr.setterMethod != null)
+            {
+                tool.put("setterMethod", rr.setterMethod);
+            }
+            for (Map.Entry<String, Object> tag : rr.tags.entrySet())
+            {
+                tool.put(tag.getKey(), tag.getValue());
+            }
+        }
+        applyTags(tool, r.tags);
+        return tool.toJson();
     }
 
     /**
-     * 1.40: setDefinedTypeTypes via {@link BmDefinedTypeHelper}. Validates
-     * each FQN in the requested composition; mutation lands in 1.41.
+     * 1.40.1: setDefinedTypeTypes - real mutation via
+     * {@link BmDefinedTypeHelper#setTypes}. Probes
+     * {@code MdClassUtil.getProducedTypes} and copies existing TypeItem
+     * entries (avoiding EMF containment moves); falls back to a
+     * {@code partialMutation} tag for primitive-only requests when the
+     * platform factory is missing.
      */
     private String opSetDefinedTypeTypes(Map<String, String> params)
     {
@@ -1319,6 +1372,10 @@ public class EditMetadataTool implements IMcpTool
         String ownerFqn = JsonUtils.extractStringArgument(params, "ownerFqn"); //$NON-NLS-1$
         String typesCsv = JsonUtils.extractStringArgument(params, "types"); //$NON-NLS-1$
         boolean dryRun = JsonUtils.extractBooleanArgument(params, "dryRun", false); //$NON-NLS-1$
+        if (ownerFqn == null || ownerFqn.isEmpty())
+        {
+            return ToolResult.error("setDefinedTypeTypes requires ownerFqn (DefinedType.X)").toJson();
+        }
         if (typesCsv == null || typesCsv.isEmpty())
         {
             return ToolResult.error("setDefinedTypeTypes requires 'types' (CSV of FQNs)").toJson();
@@ -1349,7 +1406,17 @@ public class EditMetadataTool implements IMcpTool
                 {
                     throw new RuntimeException(tr.error != null ? tr.error : "setTypes failed");
                 }
-                return "Types resolved: " + tr.resolved.size() + " (mutation pending 1.41)";
+                if (tr.idempotentSkip)
+                {
+                    return "idempotentSkip: types already match the requested composition";
+                }
+                StringBuilder summary = new StringBuilder("Types applied: ") //$NON-NLS-1$
+                    .append(tr.resolved.size());
+                if (!tr.unresolved.isEmpty())
+                {
+                    summary.append(" (unresolved: ").append(tr.unresolved.size()).append(")"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                return summary.toString();
             });
         ToolResult tool = r.ok ? ToolResult.success() : ToolResult.error(r.error != null ? r.error : "setDefinedTypeTypes failed");
         tool.put("operation", "setDefinedTypeTypes")
@@ -1357,8 +1424,15 @@ public class EditMetadataTool implements IMcpTool
             .put("requestedTypes", types);
         if (ref.get() != null)
         {
-            tool.put("resolved", ref.get().resolved)
-                .put("unresolved", ref.get().unresolved);
+            com.ditrix.edt.mcp.server.utils.BmDefinedTypeHelper.TypesResult tr = ref.get();
+            tool.put("resolved", tr.resolved)
+                .put("unresolved", tr.unresolved)
+                .put("mutated", tr.mutated)
+                .put("idempotentSkip", tr.idempotentSkip);
+            if (!tr.unresolved.isEmpty())
+            {
+                tool.put("partialMutation", "Some FQNs could not be turned into TypeItems"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
         }
         applyTags(tool, r.tags);
         return tool.toJson();
@@ -1827,6 +1901,22 @@ public class EditMetadataTool implements IMcpTool
         EditFormTool editForm = new EditFormTool();
         Map<String, String> forwarded = new LinkedHashMap<>(params);
         forwarded.put("operation", op); //$NON-NLS-1$
+        return editForm.execute(forwarded);
+    }
+
+    /**
+     * 1.40.2: addRadioButton - delegates to EditFormTool addField with
+     * {@code elementType=RadioButton}. BmFormHelper already understands the
+     * RadioButton ext-info (see {@code createRadioButtonsFieldExtInfo}). Caller
+     * may still pass {@code elementType} explicitly; we set it here only when
+     * absent.
+     */
+    private String delegateToEditFormAsRadioButton(Map<String, String> params)
+    {
+        Map<String, String> forwarded = new LinkedHashMap<>(params);
+        forwarded.put("operation", "addField"); //$NON-NLS-1$ //$NON-NLS-2$
+        forwarded.putIfAbsent("elementType", "RadioButton"); //$NON-NLS-1$ //$NON-NLS-2$
+        EditFormTool editForm = new EditFormTool();
         return editForm.execute(forwarded);
     }
 
