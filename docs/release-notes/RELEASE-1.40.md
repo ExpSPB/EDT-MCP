@@ -47,9 +47,9 @@ backward compat with existing skills. Full removal scheduled for 2.0.
 - `addSubsystemContent` / `removeSubsystemContent` — FQN-based via the new
   `BmSubsystemHelper`, idempotent
 - `setRoleRight` — right-name resolution + canonical mapping (RU/EN aliases)
-  through new `BmRightsHelper`. Mutation writer lands in 1.41.
+  through new `BmRightsHelper`. Mutation writer landed in 1.40.1.
 - `setDefinedTypeTypes` — FQN validation via new `BmDefinedTypeHelper`.
-  Mutation writer lands in 1.41.
+  Mutation writer landed in 1.40.1.
 - `addEventSubscriptionHandler` — with **defensive layer 3.8.1** handler
   auto-prefix.
 
@@ -189,12 +189,14 @@ NoClassDefFoundError.
 
 - 4 Form ops requiring BmFormHelper extensions:
   addFormAttributeColumn, addDynamicListTable, addRadioButton,
-  setupSettingsComposerOnForm
+  setupSettingsComposerOnForm. `addRadioButton` landed in 1.40.2 (delegate
+  to addField with elementType=RadioButton); the other 3 land in 1.41.
 - 3 Template cell ops requiring ITemplateLayoutService writers:
-  setTemplateCell, mergeTemplateCells, drawTemplate
-- 13 DCS ops requiring DcsWorkshopTool extensions
-- `setRoleRight` / `setDefinedTypeTypes` mutation writers (resolution +
-  validation work; mutation lands in 1.41)
+  setTemplateCell, mergeTemplateCells, drawTemplate. Architectural
+  limitation in EDT 2026.1.
+- 13 DCS ops requiring DcsWorkshopTool extensions. Land in 1.41.
+- `setRoleRight` / `setDefinedTypeTypes` mutation writers - landed in
+  1.40.1 ahead of schedule.
 - Real transactional batch (one IBmModel.execute for multiple ops with
   rollback on error) — current 1.40 batch is non-transactional
 

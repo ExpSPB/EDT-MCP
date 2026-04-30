@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 EDT MCP Server — Eclipse RCP plugin for 1C:EDT that implements the Model Context Protocol (MCP), enabling AI assistants to interact with EDT workspaces. Java 17, OSGi architecture, ~5K LOC.
 
 - **Plugin ID:** `com.ditrix.edt.mcp.server`
-- **Version:** 1.40.0-SNAPSHOT
+- **Version:** 1.41.0-SNAPSHOT
 - **Target platform:** EDT 2026.1
 - **License:** EPL 2.0
 
