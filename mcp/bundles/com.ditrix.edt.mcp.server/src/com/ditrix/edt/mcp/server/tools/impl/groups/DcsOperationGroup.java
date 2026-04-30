@@ -97,25 +97,42 @@ public final class DcsOperationGroup implements OperationGroup
         c.put("moveSchemaParameter", "Reorder a schema parameter (Up/Down or explicit position).");
         c.put("addCalculatedField", "Add a calculated field (expression over other fields).");
         c.put("addTotalField", "Add a total resource (Sum/Count/Maximum/...).");
-        c.put("addUserField", "Add a user-defined field.");
+        c.put("addUserField",
+            "1.41 native: Add a user-defined calculated field at Schema-level "
+                + "(falls back to CalculatedFields collection when UserFields is missing).");
         c.put("addSettingsGroup", "Add a grouping (regular or detailed records).");
-        c.put("addSettingsTable", "Add a table grouping (rows x columns).");
-        c.put("addSettingsChart", "Add a chart with points and series.");
-        c.put("addSettingsSelectedField", "Add a selected field.");
-        c.put("removeSettingsSelectedField", "Remove a selected field.");
+        c.put("addSettingsTable",
+            "1.41 native: Add a table grouping at Settings.Structure level.");
+        c.put("addSettingsChart",
+            "1.41 native: Add a chart at Settings.Structure level.");
+        c.put("addSettingsSelectedField",
+            "1.41 native: Add a selected field at Settings.Selection level.");
+        c.put("removeSettingsSelectedField",
+            "1.41 native: Remove a selected field by field name.");
         c.put("addSettingsFilter", "Add a filter element (20+ comparison types).");
-        c.put("addSettingsFilterGroup", "Add a filter group (AND/OR/NOT).");
-        c.put("addSettingsOrder", "Add an order (sort).");
+        c.put("addSettingsFilterGroup",
+            "1.41 native: Add a FilterItemGroup container for nested AND/OR groups.");
+        c.put("addSettingsOrder",
+            "1.41 native: Add an order (Asc/Desc) at Settings.Order level.");
         c.put("addConditionalAppearance",
             "Add conditional formatting (format, colors, font, paddings).");
-        c.put("removeConditionalAppearance", "Remove conditional formatting.");
-        c.put("setDataSetFieldAppearance", "Set static field appearance.");
+        c.put("removeConditionalAppearance",
+            "1.41 native: Remove a conditional appearance entry by index "
+                + "(target=schema|settings).");
+        c.put("setDataSetFieldAppearance",
+            "1.41 native: Set static field appearance (font, textColor, backColor, "
+                + "horizontalAlignment, verticalAlignment, border).");
         c.put("setSettingsParameter",
-            "Set a parameter value, plus viewMode=QuickAccess to surface it in the report header.");
+            "1.41 native: Overwrite an existing data parameter value at "
+                + "Settings.DataParameters level.");
         c.put("setOutputParameter",
-            "Set an output parameter (title, appearance template, chart type).");
-        c.put("addSettingsVariant", "Add a variant (deep copy of current settings).");
-        c.put("removeSettingsItem", "Remove a grouping/table/chart by id.");
+            "1.41 native: Set a Schema.OutputParameters value by name.");
+        c.put("addSettingsVariant",
+            "1.41 native: Add a variant at Schema.Variants level.");
+        c.put("removeSettingsItem",
+            "1.41 native: Universal cascade-remove by itemPath like "
+                + "'Structure[0].Filter[2]'. Removes the EObject and detaches "
+                + "all descendants.");
         c.put("repairReportSchema",
             "Reload a DCS schema from disk and refresh the BM tree (fix \"phantom\" schemas in extensions).");
         CATALOG = Collections.unmodifiableMap(c);

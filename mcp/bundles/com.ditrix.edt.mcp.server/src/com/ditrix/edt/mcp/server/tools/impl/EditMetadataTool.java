@@ -2481,12 +2481,20 @@ public class EditMetadataTool implements IMcpTool
         m.put("addConditionalAppearance", "add_appearance");
         m.put("addSettingsGroup", "add_grouping");
         m.put("addSettingsFilter", "add_filter");
-        // The following land in 1.40.x patch (extends DcsWorkshopTool):
-        // addUserField, addSettingsTable, addSettingsChart, addSettingsOrder,
-        // addSettingsSelectedField, removeSettingsSelectedField,
-        // addSettingsVariant, setSettingsParameter, removeSettingsItem,
-        // removeConditionalAppearance, setDataSetFieldAppearance,
-        // setOutputParameter, addSettingsFilterGroup
+        // 1.41: 13 deferred ops landed natively in DcsWorkshopTool
+        m.put("addUserField", "add_user_field");
+        m.put("addSettingsTable", "add_settings_table");
+        m.put("addSettingsChart", "add_settings_chart");
+        m.put("addSettingsOrder", "add_settings_order");
+        m.put("addSettingsSelectedField", "add_settings_selected_field");
+        m.put("removeSettingsSelectedField", "remove_settings_selected_field");
+        m.put("addSettingsVariant", "add_settings_variant");
+        m.put("setSettingsParameter", "set_settings_parameter");
+        m.put("removeSettingsItem", "remove_settings_item");
+        m.put("removeConditionalAppearance", "remove_conditional_appearance");
+        m.put("setDataSetFieldAppearance", "set_data_set_field_appearance");
+        m.put("setOutputParameter", "set_output_parameter");
+        m.put("addSettingsFilterGroup", "add_settings_filter_group");
         return m;
     }
 

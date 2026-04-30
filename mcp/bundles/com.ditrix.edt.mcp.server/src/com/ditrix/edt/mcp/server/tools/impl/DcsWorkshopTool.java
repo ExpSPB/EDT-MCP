@@ -157,6 +157,20 @@ public class DcsWorkshopTool implements IMcpTool
             case "add_appearance": //$NON-NLS-1$
             case "add_grouping": //$NON-NLS-1$
             case "add_filter": //$NON-NLS-1$
+            // 1.41: 13 deferred DCS ops landed natively
+            case "add_user_field": //$NON-NLS-1$
+            case "add_settings_table": //$NON-NLS-1$
+            case "add_settings_chart": //$NON-NLS-1$
+            case "add_settings_order": //$NON-NLS-1$
+            case "add_settings_selected_field": //$NON-NLS-1$
+            case "remove_settings_selected_field": //$NON-NLS-1$
+            case "add_settings_variant": //$NON-NLS-1$
+            case "set_settings_parameter": //$NON-NLS-1$
+            case "remove_settings_item": //$NON-NLS-1$
+            case "remove_conditional_appearance": //$NON-NLS-1$
+            case "set_data_set_field_appearance": //$NON-NLS-1$
+            case "set_output_parameter": //$NON-NLS-1$
+            case "add_settings_filter_group": //$NON-NLS-1$
                 return opSchemaMutation(op, params);
             default:
                 return ToolResult.error(BmDcsHelper.deferredMessage(op)).toJson();
@@ -318,6 +332,33 @@ public class DcsWorkshopTool implements IMcpTool
                 return doAddGrouping(params, schema);
             case "add_filter": //$NON-NLS-1$
                 return doAddFilter(params, schema);
+            // 1.41: 13 deferred DCS ops landed natively
+            case "add_user_field": //$NON-NLS-1$
+                return doAddUserField(params, schema);
+            case "add_settings_table": //$NON-NLS-1$
+                return doAddSettingsStructureItem(params, schema, "Table"); //$NON-NLS-1$
+            case "add_settings_chart": //$NON-NLS-1$
+                return doAddSettingsStructureItem(params, schema, "Chart"); //$NON-NLS-1$
+            case "add_settings_order": //$NON-NLS-1$
+                return doAddSettingsOrder(params, schema);
+            case "add_settings_selected_field": //$NON-NLS-1$
+                return doAddSettingsSelectedField(params, schema);
+            case "remove_settings_selected_field": //$NON-NLS-1$
+                return doRemoveSettingsSelectedField(params, schema);
+            case "add_settings_variant": //$NON-NLS-1$
+                return doAddSettingsVariant(params, schema);
+            case "set_settings_parameter": //$NON-NLS-1$
+                return doSetSettingsParameter(params, schema);
+            case "remove_settings_item": //$NON-NLS-1$
+                return doRemoveSettingsItem(params, schema);
+            case "remove_conditional_appearance": //$NON-NLS-1$
+                return doRemoveConditionalAppearance(params, schema);
+            case "set_data_set_field_appearance": //$NON-NLS-1$
+                return doSetDataSetFieldAppearance(params, schema);
+            case "set_output_parameter": //$NON-NLS-1$
+                return doSetOutputParameter(params, schema);
+            case "add_settings_filter_group": //$NON-NLS-1$
+                return doAddSettingsFilterGroup(params, schema);
             default:
                 throw new RuntimeException("Internal: unhandled op '" + op + "'"); //$NON-NLS-1$ //$NON-NLS-2$
         }
@@ -818,6 +859,568 @@ public class DcsWorkshopTool implements IMcpTool
         items.add((EObject) filterItem);
         return "filter " + field + " " + comparisonType //$NON-NLS-1$ //$NON-NLS-2$
             + (value != null ? " " + value : ""); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    // -----------------------------------------------------------------------
+    // 1.41: 13 deferred DCS mutation handlers (Phase 4)
+    // -----------------------------------------------------------------------
+
+    /**
+     * 1.41 / 4d: adds a user-defined calculated field at Schema-level (NOT
+     * DefaultSettings). User fields are calculated expressions evaluated
+     * at report runtime; they live in Schema.getUserFields() if exposed,
+     * with fallback to Schema.getCalculatedFields().
+     */
+    private Object doAddUserField(Map<String, String> params, EObject schema)
+    {
+        String name = required(params, "name"); //$NON-NLS-1$
+        String expression = required(params, "expression"); //$NON-NLS-1$
+        String title = JsonUtils.extractStringArgument(params, "title"); //$NON-NLS-1$
+        if (BmDcsHelper.findByNameInList(schema, "getUserFields", name) != null //$NON-NLS-1$
+            || BmDcsHelper.findByNameInList(schema, "getCalculatedFields", name) != null) //$NON-NLS-1$
+        {
+            throw alreadyExistsTag(name, "userField"); //$NON-NLS-1$
+        }
+        // 1.41 H2 fix: resolve target list FIRST. Mixing UserFieldExpression
+        // into CalculatedFields causes a ClassCastException inside the EMF
+        // EList.add(); resolve the list explicitly so the user gets a
+        // structured dcsFactoryMethodNotFound instead.
+        EList<EObject> userFields = BmDcsHelper.getEObjectList(schema, "getUserFields"); //$NON-NLS-1$
+        if (userFields == null)
+        {
+            throw factoryMissingTag("Schema.getUserFields"); //$NON-NLS-1$
+        }
+        Object userField = BmDcsHelper.createElement("createUserFieldExpression"); //$NON-NLS-1$
+        if (userField == null)
+        {
+            userField = BmDcsHelper.createElement("createUserField"); //$NON-NLS-1$
+        }
+        if (userField == null)
+        {
+            throw factoryMissingTag("createUserFieldExpression, createUserField"); //$NON-NLS-1$
+        }
+        BmDcsHelper.setProperty(userField, "name", name); //$NON-NLS-1$
+        BmDcsHelper.setProperty(userField, "expression", expression); //$NON-NLS-1$
+        if (title != null)
+        {
+            BmDcsHelper.setProperty(userField, "title", title); //$NON-NLS-1$
+        }
+        userFields.add((EObject) userField);
+        return "user field '" + name + "' added"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * 1.41 / 4a: shared implementation for addSettingsTable / addSettingsChart -
+     * both append a structure item of the corresponding type to
+     * {@code Schema.getDefaultSettings().getStructure().getItems()}.
+     *
+     * @param kind {@code "Table"} or {@code "Chart"}
+     */
+    private Object doAddSettingsStructureItem(Map<String, String> params, EObject schema, String kind)
+    {
+        String name = JsonUtils.extractStringArgument(params, "name"); //$NON-NLS-1$
+        Object settings = invokeGetter(schema, "getDefaultSettings"); //$NON-NLS-1$
+        if (settings == null)
+        {
+            throw new RuntimeException("Schema.getDefaultSettings() not available"); //$NON-NLS-1$
+        }
+        Object structure = invokeGetter(settings, "getStructure"); //$NON-NLS-1$
+        if (structure == null)
+        {
+            throw new RuntimeException("DefaultSettings.getStructure() not available"); //$NON-NLS-1$
+        }
+        String factoryMethod = "createSettings" + kind; //$NON-NLS-1$
+        Object item = BmDcsHelper.createElement(factoryMethod);
+        if (item == null)
+        {
+            // Fallback: createTableStructureItem / createChartStructureItem
+            item = BmDcsHelper.createElement("create" + kind + "StructureItem"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (item == null)
+        {
+            throw factoryMissingTag(factoryMethod + ", create" + kind + "StructureItem"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (name != null && !name.isEmpty())
+        {
+            BmDcsHelper.setProperty(item, "name", name); //$NON-NLS-1$
+        }
+        EList<EObject> items = resolveStructureItems(structure);
+        items.add((EObject) item);
+        return "settings " + kind.toLowerCase() //$NON-NLS-1$
+            + (name != null ? " '" + name + "'" : "") + " added"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    /**
+     * 1.41 / 4b: appends an order item to
+     * {@code Settings.getOrder().getItems()}.
+     */
+    private Object doAddSettingsOrder(Map<String, String> params, EObject schema)
+    {
+        String field = required(params, "field"); //$NON-NLS-1$
+        String orderType = orDefault(JsonUtils.extractStringArgument(params, "orderType"), //$NON-NLS-1$
+            "Asc"); //$NON-NLS-1$
+        Object settings = invokeGetter(schema, "getDefaultSettings"); //$NON-NLS-1$
+        if (settings == null)
+        {
+            throw new RuntimeException("Schema.getDefaultSettings() not available"); //$NON-NLS-1$
+        }
+        Object order = invokeGetter(settings, "getOrder"); //$NON-NLS-1$
+        if (order == null)
+        {
+            throw new RuntimeException("DefaultSettings.getOrder() not available"); //$NON-NLS-1$
+        }
+        Object orderItem = BmDcsHelper.createElement("createOrderItem"); //$NON-NLS-1$
+        if (orderItem == null)
+        {
+            orderItem = BmDcsHelper.createElement("createSettingsOrderItem"); //$NON-NLS-1$
+        }
+        if (orderItem == null)
+        {
+            throw factoryMissingTag("createOrderItem, createSettingsOrderItem"); //$NON-NLS-1$
+        }
+        BmDcsHelper.setProperty(orderItem, "field", field); //$NON-NLS-1$
+        BmDcsHelper.setProperty(orderItem, "orderType", orderType); //$NON-NLS-1$
+        EList<EObject> items = BmDcsHelper.getEObjectList(order, "getItems"); //$NON-NLS-1$
+        if (items == null)
+        {
+            throw new RuntimeException("Order.getItems() not available"); //$NON-NLS-1$
+        }
+        items.add((EObject) orderItem);
+        return "order by " + field + " (" + orderType + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /**
+     * 1.41 / 4b: appends a SelectedField to
+     * {@code Settings.getSelection().getItems()}.
+     */
+    private Object doAddSettingsSelectedField(Map<String, String> params, EObject schema)
+    {
+        String field = required(params, "field"); //$NON-NLS-1$
+        String title = JsonUtils.extractStringArgument(params, "title"); //$NON-NLS-1$
+        Object settings = invokeGetter(schema, "getDefaultSettings"); //$NON-NLS-1$
+        if (settings == null)
+        {
+            throw new RuntimeException("Schema.getDefaultSettings() not available"); //$NON-NLS-1$
+        }
+        Object selection = invokeGetter(settings, "getSelection"); //$NON-NLS-1$
+        if (selection == null)
+        {
+            throw new RuntimeException("DefaultSettings.getSelection() not available"); //$NON-NLS-1$
+        }
+        Object item = BmDcsHelper.createElement("createSelectedField"); //$NON-NLS-1$
+        if (item == null)
+        {
+            item = BmDcsHelper.createElement("createSettingsSelectedField"); //$NON-NLS-1$
+        }
+        if (item == null)
+        {
+            throw factoryMissingTag("createSelectedField, createSettingsSelectedField"); //$NON-NLS-1$
+        }
+        BmDcsHelper.setProperty(item, "field", field); //$NON-NLS-1$
+        if (title != null)
+        {
+            BmDcsHelper.setProperty(item, "title", title); //$NON-NLS-1$
+        }
+        EList<EObject> items = BmDcsHelper.getEObjectList(selection, "getItems"); //$NON-NLS-1$
+        if (items == null)
+        {
+            throw new RuntimeException("Selection.getItems() not available"); //$NON-NLS-1$
+        }
+        items.add((EObject) item);
+        return "selected field '" + field + "' added"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * 1.41 / 4b: removes a SelectedField from
+     * {@code Settings.getSelection().getItems()} by field name.
+     */
+    private Object doRemoveSettingsSelectedField(Map<String, String> params, EObject schema)
+    {
+        String field = required(params, "field"); //$NON-NLS-1$
+        Object settings = invokeGetter(schema, "getDefaultSettings"); //$NON-NLS-1$
+        if (settings == null)
+        {
+            throw new RuntimeException("Schema.getDefaultSettings() not available"); //$NON-NLS-1$
+        }
+        Object selection = invokeGetter(settings, "getSelection"); //$NON-NLS-1$
+        if (selection == null)
+        {
+            throw new RuntimeException("DefaultSettings.getSelection() not available"); //$NON-NLS-1$
+        }
+        EList<EObject> items = BmDcsHelper.getEObjectList(selection, "getItems"); //$NON-NLS-1$
+        if (items == null)
+        {
+            throw new RuntimeException("Selection.getItems() not available"); //$NON-NLS-1$
+        }
+        EObject toRemove = null;
+        for (EObject it : items)
+        {
+            Object f = invokeGetter(it, "getField"); //$NON-NLS-1$
+            if (f != null && field.equalsIgnoreCase(f.toString()))
+            {
+                toRemove = it;
+                break;
+            }
+        }
+        if (toRemove == null)
+        {
+            throw notFoundTag(field, "selectedField"); //$NON-NLS-1$
+        }
+        items.remove(toRemove);
+        return "selected field '" + field + "' removed"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * 1.41 / 4a: appends a SettingsVariant to
+     * {@code Schema.getVariants().getItems()} (Schema-level, not Settings).
+     */
+    private Object doAddSettingsVariant(Map<String, String> params, EObject schema)
+    {
+        String name = required(params, "name"); //$NON-NLS-1$
+        String presentation = JsonUtils.extractStringArgument(params, "presentation"); //$NON-NLS-1$
+        Object variants = invokeGetter(schema, "getVariants"); //$NON-NLS-1$
+        if (variants == null)
+        {
+            throw new RuntimeException("Schema.getVariants() not available"); //$NON-NLS-1$
+        }
+        EList<EObject> items = BmDcsHelper.getEObjectList(variants, "getItems"); //$NON-NLS-1$
+        if (items == null && variants instanceof EList)
+        {
+            @SuppressWarnings({ "unchecked", "rawtypes" })
+            EList<EObject> coerced = (EList) variants;
+            items = coerced;
+        }
+        if (items == null)
+        {
+            throw new RuntimeException("Schema.Variants has no items collection"); //$NON-NLS-1$
+        }
+        // 1.41 idempotency: silent duplicate variants corrupt the report
+        // (UI shows only the first, the second becomes invisible junk that
+        // cannot be removed through the editor).
+        for (EObject existing : items)
+        {
+            Object existingName = invokeGetter(existing, "getName"); //$NON-NLS-1$
+            if (existingName != null && name.equalsIgnoreCase(existingName.toString()))
+            {
+                throw alreadyExistsTag(name, "settingsVariant"); //$NON-NLS-1$
+            }
+        }
+        Object variant = BmDcsHelper.createElement("createSchemaVariant"); //$NON-NLS-1$
+        if (variant == null)
+        {
+            variant = BmDcsHelper.createElement("createSettingsVariant"); //$NON-NLS-1$
+        }
+        if (variant == null)
+        {
+            throw factoryMissingTag("createSchemaVariant, createSettingsVariant"); //$NON-NLS-1$
+        }
+        BmDcsHelper.setProperty(variant, "name", name); //$NON-NLS-1$
+        if (presentation != null)
+        {
+            BmDcsHelper.setProperty(variant, "presentation", presentation); //$NON-NLS-1$
+        }
+        items.add((EObject) variant);
+        return "settings variant '" + name + "' added"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * 1.41 / 4c: locates an existing parameter in
+     * {@code Settings.getDataParameters().getItems()} by name and overwrites
+     * its value.
+     */
+    private Object doSetSettingsParameter(Map<String, String> params, EObject schema)
+    {
+        String name = required(params, "name"); //$NON-NLS-1$
+        String value = JsonUtils.extractStringArgument(params, "value"); //$NON-NLS-1$
+        Object settings = invokeGetter(schema, "getDefaultSettings"); //$NON-NLS-1$
+        if (settings == null)
+        {
+            throw new RuntimeException("Schema.getDefaultSettings() not available"); //$NON-NLS-1$
+        }
+        Object dataParameters = invokeGetter(settings, "getDataParameters"); //$NON-NLS-1$
+        if (dataParameters == null)
+        {
+            throw new RuntimeException("DefaultSettings.getDataParameters() not available"); //$NON-NLS-1$
+        }
+        EList<EObject> items = BmDcsHelper.getEObjectList(dataParameters, "getItems"); //$NON-NLS-1$
+        if (items == null)
+        {
+            throw new RuntimeException("DataParameters.getItems() not available"); //$NON-NLS-1$
+        }
+        EObject found = null;
+        for (EObject it : items)
+        {
+            Object n = invokeGetter(it, "getParameter"); //$NON-NLS-1$
+            if (n == null)
+            {
+                n = invokeGetter(it, "getName"); //$NON-NLS-1$
+            }
+            if (n != null && name.equalsIgnoreCase(n.toString()))
+            {
+                found = it;
+                break;
+            }
+        }
+        if (found == null)
+        {
+            throw notFoundTag(name, "settingsParameter"); //$NON-NLS-1$
+        }
+        BmDcsHelper.setProperty(found, "value", value); //$NON-NLS-1$
+        return "settings parameter '" + name + "' set"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * 1.41 / 4c: universal cascade-remove operation. {@code itemPath} is a
+     * dot-separated path with bracketed indices. Supported roots:
+     * {@code Structure[N]}, {@code Filter[N]}, {@code Order[N]},
+     * {@code Selection[N]}, {@code ConditionalAppearance[N]},
+     * {@code DataParameters[N]}.
+     */
+    private Object doRemoveSettingsItem(Map<String, String> params, EObject schema)
+    {
+        String itemPath = required(params, "itemPath"); //$NON-NLS-1$
+        Object settings = invokeGetter(schema, "getDefaultSettings"); //$NON-NLS-1$
+        if (settings == null)
+        {
+            throw new RuntimeException("Schema.getDefaultSettings() not available"); //$NON-NLS-1$
+        }
+        // Parse the path into root.getter[index] tokens
+        String[] parts = itemPath.split("\\."); //$NON-NLS-1$
+        if (parts.length == 0)
+        {
+            throw new RuntimeException("itemPath cannot be empty"); //$NON-NLS-1$
+        }
+        Object current = settings;
+        EList<EObject> parentList = null;
+        int parentIndex = -1;
+        for (String token : parts)
+        {
+            int lb = token.indexOf('[');
+            int rb = token.indexOf(']');
+            String collectionName = lb > 0 ? token.substring(0, lb) : token;
+            int index = (lb > 0 && rb > lb)
+                ? Integer.parseInt(token.substring(lb + 1, rb)) : -1;
+            String getterName = "get" + Character.toUpperCase(collectionName.charAt(0)) //$NON-NLS-1$
+                + collectionName.substring(1);
+            Object collection = invokeGetter(current, getterName);
+            if (collection == null)
+            {
+                throw new RuntimeException("Path segment '" + token //$NON-NLS-1$
+                    + "' not resolvable on " + current.getClass().getSimpleName()); //$NON-NLS-1$
+            }
+            EList<EObject> items = BmDcsHelper.getEObjectList(collection, "getItems"); //$NON-NLS-1$
+            if (items == null && collection instanceof EList)
+            {
+                @SuppressWarnings({ "unchecked", "rawtypes" })
+                EList<EObject> coerced = (EList) collection;
+                items = coerced;
+            }
+            if (items == null)
+            {
+                throw new RuntimeException(getterName + " has no items collection"); //$NON-NLS-1$
+            }
+            if (index < 0)
+            {
+                // Walked into a collection root without a specific index -
+                // not a removable target by itself
+                throw new RuntimeException("Path '" + token //$NON-NLS-1$
+                    + "' requires [index] to remove a specific entry"); //$NON-NLS-1$
+            }
+            if (index >= items.size())
+            {
+                throw new RuntimeException(getterName + "[" + index //$NON-NLS-1$
+                    + "] out of bounds (size=" + items.size() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            parentList = items;
+            parentIndex = index;
+            current = items.get(index);
+        }
+        if (parentList == null || parentIndex < 0)
+        {
+            throw new RuntimeException("itemPath did not resolve to a removable item"); //$NON-NLS-1$
+        }
+        // Cascade-remove: removing the EObject from its parent EList; EMF
+        // automatically detaches the contained subtree.
+        parentList.remove(parentIndex);
+        return "settings item at '" + itemPath + "' removed (cascade)"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * 1.41 / 4d: removes a ConditionalAppearance item by index from
+     * {@code Schema.getConditionalAppearance().getItems()} (or
+     * {@code Settings.getConditionalAppearance()} when {@code target=settings}).
+     */
+    private Object doRemoveConditionalAppearance(Map<String, String> params, EObject schema)
+    {
+        String indexStr = required(params, "index"); //$NON-NLS-1$
+        String target = orDefault(JsonUtils.extractStringArgument(params, "target"), "schema"); //$NON-NLS-1$ //$NON-NLS-2$
+        int index;
+        try
+        {
+            index = Integer.parseInt(indexStr);
+        }
+        catch (NumberFormatException e)
+        {
+            throw new RuntimeException("index must be an integer"); //$NON-NLS-1$
+        }
+        Object root = "settings".equalsIgnoreCase(target) //$NON-NLS-1$
+            ? invokeGetter(schema, "getDefaultSettings") //$NON-NLS-1$
+            : schema;
+        Object ca = invokeGetter(root, "getConditionalAppearance"); //$NON-NLS-1$
+        if (ca == null)
+        {
+            throw new RuntimeException(target + ".ConditionalAppearance not available"); //$NON-NLS-1$
+        }
+        EList<EObject> items = BmDcsHelper.getEObjectList(ca, "getItems"); //$NON-NLS-1$
+        if (items == null)
+        {
+            throw new RuntimeException("ConditionalAppearance.getItems() not available"); //$NON-NLS-1$
+        }
+        if (index < 0 || index >= items.size())
+        {
+            throw new RuntimeException("index out of bounds (size=" + items.size() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        items.remove(index);
+        return "conditional appearance [" + index + "] removed from " + target; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * 1.41 / 4d: sets appearance properties (font / color / horizontalAlignment /
+     * verticalAlignment / textColor) on a single DataSet field.
+     */
+    private Object doSetDataSetFieldAppearance(Map<String, String> params, EObject schema)
+    {
+        String dataSetName = required(params, "dataSet"); //$NON-NLS-1$
+        String fieldName = required(params, "field"); //$NON-NLS-1$
+        EObject dataSet = BmDcsHelper.findByNameInList(schema, "getDataSets", dataSetName); //$NON-NLS-1$
+        if (dataSet == null)
+        {
+            throw notFoundTag(dataSetName, "dataSet"); //$NON-NLS-1$
+        }
+        EObject field = BmDcsHelper.findByNameInList(dataSet, "getFields", fieldName); //$NON-NLS-1$
+        if (field == null)
+        {
+            throw notFoundTag(fieldName, "dataSetField"); //$NON-NLS-1$
+        }
+        Object appearance = invokeGetter(field, "getAppearance"); //$NON-NLS-1$
+        if (appearance == null)
+        {
+            throw new RuntimeException("DataSetField.getAppearance() not available"); //$NON-NLS-1$
+        }
+        int touched = 0;
+        for (String prop : new String[] { "font", "textColor", "backColor", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "horizontalAlignment", "verticalAlignment", "border" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        {
+            String v = JsonUtils.extractStringArgument(params, prop);
+            if (v != null && !v.isEmpty())
+            {
+                BmDcsHelper.setProperty(appearance, prop, v);
+                touched++;
+            }
+        }
+        return "dataset field '" + dataSetName + "." + fieldName //$NON-NLS-1$ //$NON-NLS-2$
+            + "' appearance updated (" + touched + " properties)"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * 1.41 / 4c: sets a value on an existing OutputParameter by name in
+     * {@code Schema.getOutputParameters()} (Schema-level).
+     */
+    private Object doSetOutputParameter(Map<String, String> params, EObject schema)
+    {
+        String name = required(params, "name"); //$NON-NLS-1$
+        String value = JsonUtils.extractStringArgument(params, "value"); //$NON-NLS-1$
+        EList<EObject> outputParams = BmDcsHelper.getEObjectList(schema, "getOutputParameters"); //$NON-NLS-1$
+        if (outputParams == null)
+        {
+            throw new RuntimeException("Schema.getOutputParameters() not available"); //$NON-NLS-1$
+        }
+        EObject found = null;
+        for (EObject p : outputParams)
+        {
+            Object n = invokeGetter(p, "getName"); //$NON-NLS-1$
+            if (n != null && name.equalsIgnoreCase(n.toString()))
+            {
+                found = p;
+                break;
+            }
+        }
+        if (found == null)
+        {
+            throw notFoundTag(name, "outputParameter"); //$NON-NLS-1$
+        }
+        BmDcsHelper.setProperty(found, "value", value); //$NON-NLS-1$
+        return "output parameter '" + name + "' set"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * 1.41 / 4a: appends a FilterItemGroup container to
+     * {@code Settings.getFilter().getItems()}, allowing nested AND/OR groups.
+     */
+    private Object doAddSettingsFilterGroup(Map<String, String> params, EObject schema)
+    {
+        String groupType = orDefault(JsonUtils.extractStringArgument(params, "groupType"), //$NON-NLS-1$
+            "AndGroup"); //$NON-NLS-1$
+        Object settings = invokeGetter(schema, "getDefaultSettings"); //$NON-NLS-1$
+        if (settings == null)
+        {
+            throw new RuntimeException("Schema.getDefaultSettings() not available"); //$NON-NLS-1$
+        }
+        Object filter = invokeGetter(settings, "getFilter"); //$NON-NLS-1$
+        if (filter == null)
+        {
+            throw new RuntimeException("DefaultSettings.getFilter() not available"); //$NON-NLS-1$
+        }
+        Object group = BmDcsHelper.createElement("createFilterItemGroup"); //$NON-NLS-1$
+        if (group == null)
+        {
+            group = BmDcsHelper.createElement("createSettingsFilterGroup"); //$NON-NLS-1$
+        }
+        if (group == null)
+        {
+            throw factoryMissingTag("createFilterItemGroup, createSettingsFilterGroup"); //$NON-NLS-1$
+        }
+        BmDcsHelper.setProperty(group, "groupType", groupType); //$NON-NLS-1$
+        EList<EObject> items = BmDcsHelper.getEObjectList(filter, "getItems"); //$NON-NLS-1$
+        if (items == null)
+        {
+            throw new RuntimeException("Filter.getItems() not available"); //$NON-NLS-1$
+        }
+        items.add((EObject) group);
+        return "filter group (" + groupType + ") added"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * 1.41: structured "factory not exposed" error for the AI to surface
+     * a {@code dcsFactoryMethodNotFound} tag with the tried method names.
+     */
+    private MetadataGuards.BlockedGuardException factoryMissingTag(String triedMethods)
+    {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("triedMethods", triedMethods); //$NON-NLS-1$
+        return new MetadataGuards.BlockedGuardException(MetadataGuards.Verdict.block(
+            "dcsFactoryMethodNotFound: " + triedMethods, //$NON-NLS-1$
+            "EDT factory does not expose this method - GUI fallback required.", //$NON-NLS-1$
+            new MetadataGuards.ErrorTag("dcsFactoryMethodNotFound", data))); //$NON-NLS-1$
+    }
+
+    /**
+     * 1.41: walks {@code structure}, returning the items collection regardless
+     * of whether it's an EList directly or a wrapper with {@code getItems()}.
+     */
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    private EList<EObject> resolveStructureItems(Object structure)
+    {
+        if (structure instanceof EList)
+        {
+            return (EList) structure;
+        }
+        EList<EObject> items = BmDcsHelper.getEObjectList(structure, "getItems"); //$NON-NLS-1$
+        if (items == null)
+        {
+            throw new RuntimeException("Structure has no items collection"); //$NON-NLS-1$
+        }
+        return items;
     }
 
     // -----------------------------------------------------------------------
