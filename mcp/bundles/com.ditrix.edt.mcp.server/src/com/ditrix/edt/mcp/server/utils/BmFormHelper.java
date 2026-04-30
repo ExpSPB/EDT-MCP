@@ -238,12 +238,17 @@ public class BmFormHelper
         catch (Exception e)
         {
             Activator.logError("BM form operation failed", e); //$NON-NLS-1$
-            String message = "Error: BM API error: " + e.getMessage(); //$NON-NLS-1$
-            if (e.getCause() != null)
+            // 1.41: defensive unwrap so InvocationTargetException /
+            // UndeclaredThrowableException do not strip the original
+            // formApiNotFound: marker.
+            Throwable root = e;
+            while (root.getCause() != null && root.getCause() != root)
             {
-                message += " (cause: " + e.getCause().getMessage() + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+                root = root.getCause();
             }
-            return message;
+            String rootMsg = root.getMessage() != null ? root.getMessage()
+                : root.getClass().getSimpleName();
+            return "Error: BM API error: " + rootMsg; //$NON-NLS-1$
         }
     }
 
@@ -432,6 +437,417 @@ public class BmFormHelper
             }
         }
         return attribute;
+    }
+
+    // -----------------------------------------------------------------------
+    // 1.41: Forms 3 deferred ops (addFormAttributeColumn,
+    //       addDynamicListTable, setupSettingsComposer)
+    // -----------------------------------------------------------------------
+
+    /**
+     * 1.41: probes a factory method on either {@link #formFactory} or
+     * {@link #mdFactory} by name, returning the freshly-created EObject
+     * or {@code null} when no candidate exists.
+     */
+    private Object probeFactoryCreate(String... methodCandidates)
+    {
+        for (String mname : methodCandidates)
+        {
+            try
+            {
+                return ffClass.getMethod(mname).invoke(formFactory);
+            }
+            catch (NoSuchMethodException ignored)
+            {
+                // try next candidate / factory
+            }
+            catch (Exception ignored)
+            {
+                // factory exists but threw - move on
+            }
+            try
+            {
+                return mdFactoryClass.getMethod(mname).invoke(mdFactory);
+            }
+            catch (NoSuchMethodException ignored)
+            {
+                // try next candidate
+            }
+            catch (Exception ignored)
+            {
+                // method exists but threw - move on
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 1.41: searches the form's top-level attributes list for a FormAttribute
+     * by name. Case-insensitive. Returns {@code null} when not found.
+     */
+    private Object findFormAttributeByName(Object form, String name) throws Exception
+    {
+        Object attributes = formIface.getMethod("getAttributes").invoke(form); //$NON-NLS-1$
+        int size = (Integer) attributes.getClass().getMethod("size").invoke(attributes); //$NON-NLS-1$
+        for (int i = 0; i < size; i++)
+        {
+            Object attr = attributes.getClass().getMethod("get", Integer.TYPE).invoke(attributes, i); //$NON-NLS-1$
+            try
+            {
+                String attrName = (String) namedIface.getMethod("getName").invoke(attr); //$NON-NLS-1$
+                if (name.equalsIgnoreCase(attrName))
+                {
+                    return attr;
+                }
+            }
+            catch (Exception ignored)
+            {
+                // unnamed entry, skip
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 1.41: invokes a single-parameter setter on a target by name. Used for
+     * {@code setExtInfo} where the parameter type varies across attribute
+     * subtypes (DynamicListExtInfo, DataCompositionSettingsComposerExtInfo,
+     * etc.).
+     */
+    private void invokeSingleParamSetter(Object target, String setterName, Object value) throws Exception
+    {
+        for (Method m : target.getClass().getMethods())
+        {
+            if (m.getName().equals(setterName) && m.getParameterCount() == 1)
+            {
+                m.invoke(target, value);
+                return;
+            }
+        }
+        throw new NoSuchMethodException(setterName + "(...) on " + target.getClass().getName()); //$NON-NLS-1$
+    }
+
+    /**
+     * 1.41: adds a column to a parent FormAttribute of type Table.
+     * <p>
+     * Idempotent: a column with the same name already attached to the
+     * parent attribute returns a propertyMismatch-style notice instead of
+     * duplicating. When the EDT factory does not expose
+     * {@code createFormAttributeColumn}, throws an
+     * {@link UnsupportedOperationException} prefixed with {@code formApiNotFound:}
+     * so the caller can surface a structured error tag.
+     *
+     * @return descriptive success message
+     */
+    public String addFormAttributeColumn(Object form, String parentAttributeName,
+        String name, String title, String dataPath) throws Exception
+    {
+        if (parentAttributeName == null || parentAttributeName.isEmpty())
+        {
+            throw new IllegalArgumentException("parentAttributeName is required"); //$NON-NLS-1$
+        }
+        if (name == null || name.isEmpty())
+        {
+            throw new IllegalArgumentException("name is required"); //$NON-NLS-1$
+        }
+        Object parent = findFormAttributeByName(form, parentAttributeName);
+        if (parent == null)
+        {
+            throw new IllegalStateException("FormAttribute not found: " + parentAttributeName); //$NON-NLS-1$
+        }
+
+        // Idempotency: check existing columns
+        Object columns;
+        try
+        {
+            columns = parent.getClass().getMethod("getColumns").invoke(parent); //$NON-NLS-1$
+        }
+        catch (NoSuchMethodException e)
+        {
+            throw new UnsupportedOperationException(
+                "formApiNotFound: parent FormAttribute has no getColumns() - " //$NON-NLS-1$
+                    + "is the parent of type Table?"); //$NON-NLS-1$
+        }
+        int size = (Integer) columns.getClass().getMethod("size").invoke(columns); //$NON-NLS-1$
+        for (int i = 0; i < size; i++)
+        {
+            Object existing = columns.getClass().getMethod("get", Integer.TYPE).invoke(columns, i); //$NON-NLS-1$
+            try
+            {
+                String existingName = (String) namedIface.getMethod("getName").invoke(existing); //$NON-NLS-1$
+                if (name.equalsIgnoreCase(existingName))
+                {
+                    return "addFormAttributeColumn idempotent: column '" + name //$NON-NLS-1$
+                        + "' already exists in '" + parentAttributeName + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            catch (Exception ignored)
+            {
+                // skip unnamed
+            }
+        }
+
+        Object column = probeFactoryCreate("createFormAttributeColumn"); //$NON-NLS-1$
+        if (column == null)
+        {
+            throw new UnsupportedOperationException(
+                "formApiNotFound: createFormAttributeColumn (tried FormFactory, MdClassFactory)"); //$NON-NLS-1$
+        }
+        namedIface.getMethod("setName", String.class).invoke(column, name); //$NON-NLS-1$
+        if (title != null && !title.isEmpty())
+        {
+            try
+            {
+                setTitle(column, title);
+            }
+            catch (Exception ignored)
+            {
+                // column may not implement Titled in every EDT version
+            }
+        }
+        if (dataPath != null && !dataPath.isEmpty())
+        {
+            try
+            {
+                setDataPath(column, dataPath);
+            }
+            catch (Exception ignored)
+            {
+                // column may not be a DataItem
+            }
+        }
+        columns.getClass().getMethod("add", Object.class).invoke(columns, column); //$NON-NLS-1$
+        return "added column '" + name + "' to FormAttribute '" //$NON-NLS-1$ //$NON-NLS-2$
+            + parentAttributeName + "'"; //$NON-NLS-1$
+    }
+
+    /**
+     * 1.41: creates a FormAttribute of type DynamicList plus a UI Table item
+     * bound to it. Sets common wizard properties on the dynamic-list ExtInfo:
+     * mainTable, autoSaveCustomization=true, dynamicDataRead=true.
+     * <p>
+     * The caller is responsible for adding the result Table to a container
+     * via {@link #addToContainer}; this method only returns it through the
+     * {@link DynamicListResult} struct.
+     */
+    public DynamicListResult addDynamicListAttributeAndTable(Object form,
+        String attributeName, String tableName, String mainTable, String title) throws Exception
+    {
+        if (attributeName == null || attributeName.isEmpty())
+        {
+            throw new IllegalArgumentException("attributeName is required"); //$NON-NLS-1$
+        }
+        if (tableName == null || tableName.isEmpty())
+        {
+            throw new IllegalArgumentException("tableName is required"); //$NON-NLS-1$
+        }
+        // Idempotency: existing attribute with the same name
+        Object existing = findFormAttributeByName(form, attributeName);
+        if (existing != null)
+        {
+            DynamicListResult r = new DynamicListResult();
+            r.attribute = existing;
+            r.idempotent = true;
+            r.message = "addDynamicListTable idempotent: FormAttribute '" //$NON-NLS-1$
+                + attributeName + "' already exists"; //$NON-NLS-1$
+            return r;
+        }
+
+        Object attribute = createFormAttribute(attributeName, title);
+
+        Object extInfo = probeFactoryCreate(
+            "createDynamicListExtInfo", //$NON-NLS-1$
+            "createDynamicListAttributeExtInfo"); //$NON-NLS-1$
+        if (extInfo == null)
+        {
+            throw new UnsupportedOperationException(
+                "formApiNotFound: createDynamicListExtInfo " //$NON-NLS-1$
+                    + "(tried FormFactory and MdClassFactory)"); //$NON-NLS-1$
+        }
+        invokeSingleParamSetter(attribute, "setExtInfo", extInfo); //$NON-NLS-1$
+
+        // Wizard defaults: best-effort, ignore individual failures
+        if (mainTable != null && !mainTable.isEmpty())
+        {
+            try
+            {
+                invokeSingleParamSetter(extInfo, "setMainTable", mainTable); //$NON-NLS-1$
+            }
+            catch (Exception ignored)
+            {
+                // setter may not exist, leave default
+            }
+        }
+        for (String[] booleanProp : new String[][] {
+            { "setAutoSaveCustomization", "true" }, //$NON-NLS-1$ //$NON-NLS-2$
+            { "setDynamicDataRead", "true" }, //$NON-NLS-1$ //$NON-NLS-2$
+            { "setCustomQuery", "false" } //$NON-NLS-1$ //$NON-NLS-2$
+        })
+        {
+            try
+            {
+                Method setter = null;
+                for (Method m : extInfo.getClass().getMethods())
+                {
+                    if (m.getName().equals(booleanProp[0]) && m.getParameterCount() == 1
+                        && (m.getParameterTypes()[0] == Boolean.TYPE
+                            || m.getParameterTypes()[0] == Boolean.class))
+                    {
+                        setter = m;
+                        break;
+                    }
+                }
+                if (setter != null)
+                {
+                    setter.invoke(extInfo, Boolean.parseBoolean(booleanProp[1]));
+                }
+            }
+            catch (Exception ignored)
+            {
+                // best-effort
+            }
+        }
+
+        addAttributeToForm(form, attribute);
+
+        // Create the bound UI Table
+        Object table = createTable(tableName, title);
+        try
+        {
+            setDataPath(table, attributeName);
+        }
+        catch (Exception ignored)
+        {
+            // best-effort: dataPath wiring may need explicit setup later
+        }
+
+        DynamicListResult r = new DynamicListResult();
+        r.attribute = attribute;
+        r.table = table;
+        r.idempotent = false;
+        r.message = "added DynamicList FormAttribute '" + attributeName //$NON-NLS-1$
+            + "' and UI Table '" + tableName + "'" //$NON-NLS-1$ //$NON-NLS-2$
+            + (mainTable != null ? " (mainTable=" + mainTable + ")" : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return r;
+    }
+
+    /**
+     * 1.41: result of {@link #addDynamicListAttributeAndTable}.
+     */
+    public static final class DynamicListResult
+    {
+        public Object attribute;
+        public Object table;
+        public boolean idempotent;
+        public String message;
+    }
+
+    /**
+     * 1.41: creates a FormAttribute of type DataCompositionSettingsComposer
+     * plus two UI tables (Settings + UserSettings) wired via dataPath.
+     * Returns the composer attribute, both tables, and BSL initialization
+     * snippets in both RU and EN dialects.
+     */
+    public SettingsComposerResult setupSettingsComposer(Object form, String composerName,
+        String settingsTableName, String userSettingsTableName) throws Exception
+    {
+        if (composerName == null || composerName.isEmpty())
+        {
+            composerName = "Composer"; //$NON-NLS-1$
+        }
+        if (settingsTableName == null || settingsTableName.isEmpty())
+        {
+            settingsTableName = "SettingsTable"; //$NON-NLS-1$
+        }
+        if (userSettingsTableName == null || userSettingsTableName.isEmpty())
+        {
+            userSettingsTableName = "UserSettingsTable"; //$NON-NLS-1$
+        }
+
+        // Idempotency
+        Object existing = findFormAttributeByName(form, composerName);
+        if (existing != null)
+        {
+            SettingsComposerResult r = new SettingsComposerResult();
+            r.composer = existing;
+            r.idempotent = true;
+            r.message = "setupSettingsComposerOnForm idempotent: FormAttribute '" //$NON-NLS-1$
+                + composerName + "' already exists"; //$NON-NLS-1$
+            populateSettingsComposerSnippets(r, composerName);
+            return r;
+        }
+
+        Object composer = createFormAttribute(composerName, null);
+
+        Object extInfo = probeFactoryCreate(
+            "createDataCompositionSettingsComposerExtInfo", //$NON-NLS-1$
+            "createSettingsComposerExtInfo"); //$NON-NLS-1$
+        if (extInfo == null)
+        {
+            throw new UnsupportedOperationException(
+                "formApiNotFound: createDataCompositionSettingsComposerExtInfo " //$NON-NLS-1$
+                    + "(SettingsComposer ExtInfo factory not exposed)"); //$NON-NLS-1$
+        }
+        invokeSingleParamSetter(composer, "setExtInfo", extInfo); //$NON-NLS-1$
+        addAttributeToForm(form, composer);
+
+        Object settingsTable = createTable(settingsTableName, null);
+        try
+        {
+            setDataPath(settingsTable, composerName + ".Settings"); //$NON-NLS-1$
+        }
+        catch (Exception ignored)
+        {
+            // best-effort
+        }
+        Object userSettingsTable = createTable(userSettingsTableName, null);
+        try
+        {
+            setDataPath(userSettingsTable, composerName + ".UserSettings"); //$NON-NLS-1$
+        }
+        catch (Exception ignored)
+        {
+            // best-effort
+        }
+
+        SettingsComposerResult r = new SettingsComposerResult();
+        r.composer = composer;
+        r.settingsTable = settingsTable;
+        r.userSettingsTable = userSettingsTable;
+        r.idempotent = false;
+        populateSettingsComposerSnippets(r, composerName);
+        r.message = "setupSettingsComposerOnForm: created '" + composerName //$NON-NLS-1$
+            + "' + UI tables '" + settingsTableName + "', '" + userSettingsTableName + "'"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return r;
+    }
+
+    /**
+     * 1.41: fills RU and EN BSL snippets on the result struct so both
+     * idempotent and non-idempotent paths surface the example to the AI.
+     */
+    private void populateSettingsComposerSnippets(SettingsComposerResult r, String composerName)
+    {
+        r.bslSnippetRu = "// 1.41: paste into ProcedureOnCreateAtServer (ru)\n" //$NON-NLS-1$
+            + composerName + ".Инициализировать(" //$NON-NLS-1$ // Инициализировать
+            + "Новый ИсточникДоступныхНастроекКомпоновкиДанных(СхемаКД));\n" //$NON-NLS-1$
+            + composerName + ".ЗагрузитьНастройки(СхемаКД.НастройкиПоУмолчанию);"; //$NON-NLS-1$
+        r.bslSnippetEn = "// 1.41: paste into ProcedureOnCreateAtServer (en)\n" //$NON-NLS-1$
+            + composerName + ".Initialize(New DataCompositionAvailableSettingsSource(Schema));\n" //$NON-NLS-1$
+            + composerName + ".LoadSettings(Schema.DefaultSettings);"; //$NON-NLS-1$
+    }
+
+    /**
+     * 1.41: result of {@link #setupSettingsComposer}.
+     */
+    public static final class SettingsComposerResult
+    {
+        public Object composer;
+        public Object settingsTable;
+        public Object userSettingsTable;
+        public boolean idempotent;
+        public String message;
+        public String bslSnippetRu;
+        public String bslSnippetEn;
     }
 
     /**

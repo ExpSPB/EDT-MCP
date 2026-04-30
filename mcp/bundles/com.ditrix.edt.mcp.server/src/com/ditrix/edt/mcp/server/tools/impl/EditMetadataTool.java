@@ -436,19 +436,13 @@ public class EditMetadataTool implements IMcpTool
             // ---- Form ops 1.40.2: addRadioButton delegates to addField with elementType=RadioButton ----
             case "addRadioButton": //$NON-NLS-1$
                 return delegateToEditFormAsRadioButton(params);
-            // ---- Form ops 1.40: deferred to 1.41 (require BmFormHelper extensions) ----
+            // ---- Form ops 1.41: native implementations (BmFormHelper extensions) ----
             case "addFormAttributeColumn": //$NON-NLS-1$
-                return ToolResult.error("addFormAttributeColumn lands in 1.41 (BmFormHelper extension for "
-                    + "FormAttribute.columns mutation pending). Workaround: open the form in EDT and "
-                    + "add the column via the table attribute editor.").toJson();
+                return opAddFormAttributeColumn(params);
             case "addDynamicListTable": //$NON-NLS-1$
-                return ToolResult.error("addDynamicListTable lands in 1.41 (combined "
-                    + "FormAttribute(DynamicList) + Table creation pending). Workaround: use addFormAttribute "
-                    + "with type=DynamicList, then addTable bound to that attribute.").toJson();
+                return opAddDynamicListTable(params);
             case "setupSettingsComposerOnForm": //$NON-NLS-1$
-                return ToolResult.error("setupSettingsComposerOnForm lands in 1.41 (multi-step scenario: "
-                    + "SettingsComposer attribute + UI tables + ExtInfo wiring). Workaround: use the EDT "
-                    + "GUI 'New form' wizard for reports - the wizard sets up the composer automatically.").toJson();
+                return opSetupSettingsComposerOnForm(params);
 
             // ---- Templates group 1.40 ----
             case "addTemplate": //$NON-NLS-1$
@@ -1800,6 +1794,214 @@ public class EditMetadataTool implements IMcpTool
             return "added attribute " + attributeName; //$NON-NLS-1$
         });
         return formatFormResult(result, "addFormAttribute", formFqn); //$NON-NLS-1$
+    }
+
+    /**
+     * 1.41: adds a column to a parent FormAttribute of type Table. Idempotent.
+     * Surfaces {@code formApiNotFound} structured tag when EDT does not
+     * expose {@code FormFactory.createFormAttributeColumn}.
+     */
+    private String opAddFormAttributeColumn(Map<String, String> params)
+    {
+        String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
+        String formFqn = JsonUtils.extractStringArgument(params, "formFqn"); //$NON-NLS-1$
+        String parentAttributeName = JsonUtils.extractStringArgument(params, "parentAttributeName"); //$NON-NLS-1$
+        String name = JsonUtils.extractStringArgument(params, "name"); //$NON-NLS-1$
+        String title = JsonUtils.extractStringArgument(params, "title"); //$NON-NLS-1$
+        String dataPath = JsonUtils.extractStringArgument(params, "dataPath"); //$NON-NLS-1$
+
+        String err = requireNonEmpty(projectName, "projectName") //$NON-NLS-1$
+            + requireNonEmpty(formFqn, "formFqn") //$NON-NLS-1$
+            + requireNonEmpty(parentAttributeName, "parentAttributeName") //$NON-NLS-1$
+            + requireNonEmpty(name, "name"); //$NON-NLS-1$
+        if (!err.isEmpty())
+        {
+            return ToolResult.error(err.trim()).toJson();
+        }
+        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
+        if (project == null || !project.exists())
+        {
+            return ToolResult.error("Project not found: " + projectName).toJson(); //$NON-NLS-1$
+        }
+        BmFormHelper helper = new BmFormHelper();
+        if (!helper.init())
+        {
+            return ToolResult.error("EDT form model unavailable in this runtime").toJson(); //$NON-NLS-1$
+        }
+        String result = helper.executeFormOperation(project, formFqn, (tx, form) ->
+            helper.addFormAttributeColumn(form, parentAttributeName, name, title, dataPath));
+        return formatFormResultWithApiTag(result, "addFormAttributeColumn", formFqn); //$NON-NLS-1$
+    }
+
+    /**
+     * 1.41: creates a FormAttribute of type DynamicList plus a UI Table
+     * bound to it. Wizard properties (mainTable, autoSaveCustomization,
+     * dynamicDataRead) are populated where the EDT API permits.
+     */
+    private String opAddDynamicListTable(Map<String, String> params)
+    {
+        String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
+        String formFqn = JsonUtils.extractStringArgument(params, "formFqn"); //$NON-NLS-1$
+        String attributeName = JsonUtils.extractStringArgument(params, "attributeName"); //$NON-NLS-1$
+        String tableName = JsonUtils.extractStringArgument(params, "tableName"); //$NON-NLS-1$
+        String mainTable = JsonUtils.extractStringArgument(params, "mainTable"); //$NON-NLS-1$
+        String title = JsonUtils.extractStringArgument(params, "title"); //$NON-NLS-1$
+
+        String err = requireNonEmpty(projectName, "projectName") //$NON-NLS-1$
+            + requireNonEmpty(formFqn, "formFqn") //$NON-NLS-1$
+            + requireNonEmpty(attributeName, "attributeName") //$NON-NLS-1$
+            + requireNonEmpty(tableName, "tableName"); //$NON-NLS-1$
+        if (!err.isEmpty())
+        {
+            return ToolResult.error(err.trim()).toJson();
+        }
+        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
+        if (project == null || !project.exists())
+        {
+            return ToolResult.error("Project not found: " + projectName).toJson(); //$NON-NLS-1$
+        }
+        BmFormHelper helper = new BmFormHelper();
+        if (!helper.init())
+        {
+            return ToolResult.error("EDT form model unavailable in this runtime").toJson(); //$NON-NLS-1$
+        }
+        Object[] resultHolder = new Object[1];
+        String execResult = helper.executeFormOperation(project, formFqn, (tx, form) ->
+        {
+            BmFormHelper.DynamicListResult dlr = helper.addDynamicListAttributeAndTable(
+                form, attributeName, tableName, mainTable, title);
+            // Attach the new UI Table to the form root (caller can move it later
+            // via setFormItemProperty / move ops).
+            if (!dlr.idempotent && dlr.table != null)
+            {
+                helper.addToContainer(form, dlr.table);
+            }
+            resultHolder[0] = dlr;
+            return dlr.message;
+        });
+        if (execResult != null && execResult.startsWith("Error:")) //$NON-NLS-1$
+        {
+            return formatFormResultWithApiTag(execResult, "addDynamicListTable", formFqn); //$NON-NLS-1$
+        }
+        BmFormHelper.DynamicListResult dlr = (BmFormHelper.DynamicListResult) resultHolder[0];
+        ToolResult tr = ToolResult.success()
+            .put("operation", "addDynamicListTable") //$NON-NLS-1$ //$NON-NLS-2$
+            .put("formFqn", formFqn) //$NON-NLS-1$
+            .put("message", dlr != null ? dlr.message : execResult) //$NON-NLS-1$
+            .put("attributeName", attributeName) //$NON-NLS-1$
+            .put("tableName", tableName); //$NON-NLS-1$
+        if (dlr != null)
+        {
+            tr.put("idempotent", dlr.idempotent); //$NON-NLS-1$
+        }
+        return tr.toJson();
+    }
+
+    /**
+     * 1.41: creates a DataCompositionSettingsComposer FormAttribute plus two
+     * UI tables (Settings + UserSettings). Returns success JSON enriched
+     * with RU and EN BSL snippets ready to paste into
+     * {@code ProcedureOnCreateAtServer}.
+     */
+    private String opSetupSettingsComposerOnForm(Map<String, String> params)
+    {
+        String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
+        String formFqn = JsonUtils.extractStringArgument(params, "formFqn"); //$NON-NLS-1$
+        String composerName = JsonUtils.extractStringArgument(params, "composerName"); //$NON-NLS-1$
+        String settingsTableName = JsonUtils.extractStringArgument(params, "settingsTableName"); //$NON-NLS-1$
+        String userSettingsTableName = JsonUtils.extractStringArgument(params, "userSettingsTableName"); //$NON-NLS-1$
+
+        String err = requireNonEmpty(projectName, "projectName") //$NON-NLS-1$
+            + requireNonEmpty(formFqn, "formFqn"); //$NON-NLS-1$
+        if (!err.isEmpty())
+        {
+            return ToolResult.error(err.trim()).toJson();
+        }
+        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
+        if (project == null || !project.exists())
+        {
+            return ToolResult.error("Project not found: " + projectName).toJson(); //$NON-NLS-1$
+        }
+        BmFormHelper helper = new BmFormHelper();
+        if (!helper.init())
+        {
+            return ToolResult.error("EDT form model unavailable in this runtime").toJson(); //$NON-NLS-1$
+        }
+        Object[] resultHolder = new Object[1];
+        String execResult = helper.executeFormOperation(project, formFqn, (tx, form) ->
+        {
+            BmFormHelper.SettingsComposerResult scr = helper.setupSettingsComposer(
+                form, composerName, settingsTableName, userSettingsTableName);
+            if (!scr.idempotent)
+            {
+                if (scr.settingsTable != null)
+                {
+                    helper.addToContainer(form, scr.settingsTable);
+                }
+                if (scr.userSettingsTable != null)
+                {
+                    helper.addToContainer(form, scr.userSettingsTable);
+                }
+            }
+            resultHolder[0] = scr;
+            return scr.message;
+        });
+        if (execResult != null && execResult.startsWith("Error:")) //$NON-NLS-1$
+        {
+            return formatFormResultWithApiTag(execResult, "setupSettingsComposerOnForm", formFqn); //$NON-NLS-1$
+        }
+        BmFormHelper.SettingsComposerResult scr = (BmFormHelper.SettingsComposerResult) resultHolder[0];
+        ToolResult tr = ToolResult.success()
+            .put("operation", "setupSettingsComposerOnForm") //$NON-NLS-1$ //$NON-NLS-2$
+            .put("formFqn", formFqn) //$NON-NLS-1$
+            .put("message", scr != null ? scr.message : execResult); //$NON-NLS-1$
+        if (scr != null)
+        {
+            tr.put("idempotent", scr.idempotent) //$NON-NLS-1$
+                .put("composerName", composerName != null ? composerName : "Composer") //$NON-NLS-1$ //$NON-NLS-2$
+                .put("bslSnippetRu", scr.bslSnippetRu) //$NON-NLS-1$
+                .put("bslSnippetEn", scr.bslSnippetEn); //$NON-NLS-1$
+        }
+        return tr.toJson();
+    }
+
+    /**
+     * 1.41: variant of {@link #formatFormResult} that recognises the
+     * {@code formApiNotFound:} prefix used by BmFormHelper helpers when
+     * the EDT factory method is missing, and surfaces it as a structured
+     * tag instead of a generic error string.
+     */
+    private String formatFormResultWithApiTag(String helperResult, String op, String formFqn)
+    {
+        if (helperResult == null || !helperResult.startsWith("Error:")) //$NON-NLS-1$
+        {
+            return formatFormResult(helperResult, op, formFqn);
+        }
+        String body = helperResult.substring(6).trim();
+        int idx = body.indexOf("formApiNotFound:"); //$NON-NLS-1$
+        if (idx < 0)
+        {
+            return formatFormResult(helperResult, op, formFqn);
+        }
+        String missing = body.substring(idx + "formApiNotFound:".length()).trim(); //$NON-NLS-1$
+        // 1.41: trim trailing closing parens that come from upstream
+        // "(cause: ...)" wrapping so the structured tag stays clean.
+        while (missing.endsWith(")") && //$NON-NLS-1$
+            missing.length() - missing.replace("(", "").length() //$NON-NLS-1$ //$NON-NLS-2$
+                < missing.length() - missing.replace(")", "").length()) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            missing = missing.substring(0, missing.length() - 1).trim();
+        }
+        java.util.Map<String, Object> tag = new java.util.LinkedHashMap<>();
+        tag.put("missingFactory", missing); //$NON-NLS-1$
+        tag.put("hint", //$NON-NLS-1$
+            "EDT 2026.1 does not expose this factory method. Use the EDT GUI " //$NON-NLS-1$
+                + "form editor or wait for a later EDT release."); //$NON-NLS-1$
+        return ToolResult.error(op + " failed: " + body) //$NON-NLS-1$
+            .put("operation", op) //$NON-NLS-1$
+            .put("formFqn", formFqn) //$NON-NLS-1$
+            .put("formApiNotFound", tag) //$NON-NLS-1$
+            .toJson();
     }
 
     /**

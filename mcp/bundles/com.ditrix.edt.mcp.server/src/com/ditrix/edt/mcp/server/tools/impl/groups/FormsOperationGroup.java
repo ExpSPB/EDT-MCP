@@ -70,9 +70,13 @@ public final class FormsOperationGroup implements OperationGroup
         c.put("addFormAttribute",
             "Add a form attribute (filter/temporary table/dynamic list).");
         c.put("addFormAttributeColumn",
-            "Add a column to an existing form table-attribute without recreating it.");
+            "1.41: Add a column to an existing form table-attribute. Idempotent. "
+                + "Surfaces formApiNotFound tag when EDT does not expose "
+                + "FormFactory.createFormAttributeColumn.");
         c.put("addDynamicListTable",
-            "Add a dynamic-list table with all wizard properties (search, auto-refresh, quick filter, list mode).");
+            "1.41: Add a FormAttribute(DynamicList) plus a UI Table bound to it. "
+                + "Sets mainTable, autoSaveCustomization=true, dynamicDataRead=true, "
+                + "customQuery=false on the ExtInfo (best-effort).");
         c.put("addField",
             "Add an input field (type auto-detected from data path).");
         c.put("addGroup",
@@ -96,7 +100,8 @@ public final class FormsOperationGroup implements OperationGroup
         c.put("listPictures",
             "Search across 763 stock EDT pictures by name. CommonPicture.* used directly without lookup.");
         c.put("setupSettingsComposerOnForm",
-            "Add a SettingsComposer attribute + UI tables + ExtInfo to any form. Returns a ready BSL snippet.");
+            "1.41: Add a DataCompositionSettingsComposer FormAttribute + Settings/UserSettings UI tables + ExtInfo. "
+                + "Response includes RU and EN BSL snippets ready to paste into ProcedureOnCreateAtServer.");
         c.put("removeFormItem",
             "Remove a form item by name.");
         CATALOG = Collections.unmodifiableMap(c);
