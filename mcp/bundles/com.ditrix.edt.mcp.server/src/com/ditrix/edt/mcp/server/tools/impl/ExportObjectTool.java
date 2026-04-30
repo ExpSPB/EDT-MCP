@@ -8,6 +8,7 @@ package com.ditrix.edt.mcp.server.tools.impl;
 
 import java.io.File;
 import java.lang.reflect.Method;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -17,11 +18,15 @@ import org.osgi.framework.BundleContext;
 import org.osgi.framework.FrameworkUtil;
 import org.osgi.framework.ServiceReference;
 
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.BmExportHelper;
+import com.ditrix.edt.mcp.server.utils.PendingExportRegistry;
 
 /**
  * Tool to export an external data processor / report project to a binary
@@ -50,8 +55,17 @@ public class ExportObjectTool implements IMcpTool
         "com._1c.g5.v8.dt.export.epf.IEpfExportService", //$NON-NLS-1$
         "com._1c.g5.v8.dt.export.IExternalObjectExporter", //$NON-NLS-1$
         "com._1c.g5.v8.dt.export.IExportPlatformService", //$NON-NLS-1$
-        "com._1c.g5.v8.dt.bm.serializer.IBinaryDataExporter" //$NON-NLS-1$
+        "com._1c.g5.v8.dt.bm.serializer.IBinaryDataExporter", //$NON-NLS-1$
+        // 1.41: extra candidates probed against EDT 2026.1 namespaces
+        "com._1c.g5.v8.dt.epf.export.EpfExportService", //$NON-NLS-1$
+        "com._1c.g5.v8.dt.metadata.export.IMetadataExporter", //$NON-NLS-1$
+        "com._1c.g5.v8.dt.bm.export.IBmExporter" //$NON-NLS-1$
     };
+
+    /** 1.41: clamp range for timeoutSeconds on the Pending mechanism. */
+    private static final int MIN_TIMEOUT_SECONDS = 5;
+    private static final int MAX_TIMEOUT_SECONDS = 120;
+    private static final long DEFAULT_TIMEOUT_MS = 30_000L;
 
     @Override
     public String getName()
@@ -77,11 +91,20 @@ public class ExportObjectTool implements IMcpTool
             .stringProperty("projectName", "EDT project name (required)", true) //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("outputPath", //$NON-NLS-1$
                 "Absolute path to the output .epf / .erf file (required). " //$NON-NLS-1$
-                    + "Extension is appended automatically based on the object kind " //$NON-NLS-1$
-                    + "(.epf for ExternalDataProcessor, .erf for ExternalReport).", true) //$NON-NLS-1$
+                    + "Extension determines the kind: .epf for ExternalDataProcessor, " //$NON-NLS-1$
+                    + ".erf for ExternalReport. If omitted, the kind is auto-detected " //$NON-NLS-1$
+                    + "from the project nature and the proper extension is appended.", true) //$NON-NLS-1$
             .stringProperty("objectName", //$NON-NLS-1$
                 "Object name within the project (optional). Required only when the " //$NON-NLS-1$
                     + "project contains more than one external object.") //$NON-NLS-1$
+            .stringProperty("timeoutSeconds", //$NON-NLS-1$
+                "1.41: Soft timeout in seconds before returning a Pending JSON " //$NON-NLS-1$
+                    + "with a runKey. Default: 30. Range: 5-120 (clamped). Calling " //$NON-NLS-1$
+                    + "again with the same params resumes waiting.") //$NON-NLS-1$
+            .stringProperty("runKey", //$NON-NLS-1$
+                "1.41: Resume polling a previously-issued export. Pass the runKey " //$NON-NLS-1$
+                    + "returned by an earlier Pending response; other params are " //$NON-NLS-1$
+                    + "ignored. Returns the result if ready, or another Pending JSON.") //$NON-NLS-1$
             .build();
     }
 
@@ -94,20 +117,26 @@ public class ExportObjectTool implements IMcpTool
     @Override
     public String execute(Map<String, String> params)
     {
+        // 1.41: explicit retry mode
+        String runKeyParam = JsonUtils.extractStringArgument(params, "runKey"); //$NON-NLS-1$
+        if (runKeyParam != null && !runKeyParam.isEmpty())
+        {
+            return resumePending(runKeyParam, params);
+        }
+
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
-        String outputPath = JsonUtils.extractStringArgument(params, "outputPath"); //$NON-NLS-1$
+        String outputPathRaw = JsonUtils.extractStringArgument(params, "outputPath"); //$NON-NLS-1$
         String objectName = JsonUtils.extractStringArgument(params, "objectName"); //$NON-NLS-1$
 
         if (projectName == null || projectName.isEmpty())
         {
             return ToolResult.error("projectName is required").toJson(); //$NON-NLS-1$
         }
-        if (outputPath == null || outputPath.isEmpty())
+        if (outputPathRaw == null || outputPathRaw.isEmpty())
         {
             return ToolResult.error(
                 "outputPath is required. Specify an absolute path with .epf or .erf extension, " //$NON-NLS-1$
-                    + "e.g. outputPath=\"C:/build/MyReport.erf\". Without an output path, " //$NON-NLS-1$
-                    + "ask the user where to save the file.").toJson();
+                    + "e.g. outputPath=\"C:/build/MyReport.erf\".").toJson(); //$NON-NLS-1$
         }
 
         IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
@@ -116,19 +145,81 @@ public class ExportObjectTool implements IMcpTool
             return ToolResult.error("Project not found: " + projectName).toJson(); //$NON-NLS-1$
         }
 
-        // Reflection probe: which EDT export API is reachable?
+        // 1.41: detect kind from extension or project nature, normalize outputPath
+        KindResolution kind = resolveKind(project, outputPathRaw);
+        if (kind.error != null)
+        {
+            return ToolResult.error(kind.error)
+                .put("operation", NAME)
+                .put("kindMismatch", kind.diagnosticTag())
+                .toJson();
+        }
+        final String outputPath = kind.normalizedPath;
+        final String detectedKind = kind.kindLabel;
+
+        // 1.41: external object projects almost always contain a single object
+        // with the same name as the project; infer when caller omitted it.
+        final String resolvedObjectName = (objectName == null || objectName.isEmpty())
+            ? project.getName() : objectName;
+
+        // Pending registry dispatch — runKey from normalized path so retries
+        // with the bare path produce the same key as retries with the
+        // extension that the first call appended.
+        String runKey = PendingExportRegistry.computeRunKey(projectName,
+            resolvedObjectName, outputPath);
+        long timeoutMs = parseTimeoutMs(params, DEFAULT_TIMEOUT_MS);
+
+        PendingExportRegistry registry = PendingExportRegistry.getInstance();
+        registry.pruneExpired();
+
+        PendingExportRegistry.PendingEntry entry = registry.getOrStart(runKey,
+            () -> doExport(project, projectName, resolvedObjectName, outputPath, detectedKind));
+
+        String result = entry.await(timeoutMs);
+        if (result != null)
+        {
+            registry.remove(runKey);
+            return result;
+        }
+        return buildPendingJson(runKey, entry, projectName, outputPath, detectedKind, timeoutMs);
+    }
+
+    /**
+     * 1.41: synchronous export work (runs inside the registry executor).
+     * Performs BM sync (forceExportAndWait), reflection probe, OSGi service
+     * lookup, and method invocation.
+     */
+    private String doExport(IProject project, String projectName, String objectName,
+        String outputPath, String detectedKind)
+    {
+        long start = System.currentTimeMillis();
+
+        // 1.41: synchronize BM state to disk before reflection probe so newly
+        // edited objects show up to the export service. objectName is already
+        // resolved (caller-supplied or inferred from project.getName()) by
+        // execute() before this method runs.
+        IBmModelManager bmManager = Activator.getDefault().getBmModelManager();
+        if (bmManager != null && objectName != null && !objectName.isEmpty())
+        {
+            String fqn = inferFqnForKind(detectedKind, objectName);
+            if (fqn != null)
+            {
+                BmExportHelper.forceExportAndWait(bmManager, project,
+                    Collections.singletonList(fqn), 5_000L);
+            }
+        }
+
         Class<?> serviceClass = findExportService();
         if (serviceClass == null)
         {
             return buildApiUnavailableError();
         }
-        long start = System.currentTimeMillis();
         Activator.logInfo("ExportObjectTool: discovered candidate API " //$NON-NLS-1$
             + serviceClass.getName() + " (project=" + projectName //$NON-NLS-1$
             + ", outputPath=" + outputPath //$NON-NLS-1$
-            + ", objectName=" + objectName + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+            + ", objectName=" + objectName //$NON-NLS-1$
+            + ", detectedKind=" + detectedKind + ")"); //$NON-NLS-1$ //$NON-NLS-2$
 
-        // Best-effort invocation via OSGi service + reflection.
         BundleContext bc = FrameworkUtil.getBundle(ExportObjectTool.class).getBundleContext();
         if (bc == null)
         {
@@ -167,9 +258,10 @@ public class ExportObjectTool implements IMcpTool
                 Object result = exportMethod.invoke(service, args);
                 long elapsed = System.currentTimeMillis() - start;
                 return ToolResult.success()
-                    .put("operation", "export_object") //$NON-NLS-1$ //$NON-NLS-2$
+                    .put("operation", NAME) //$NON-NLS-1$
                     .put("projectName", projectName) //$NON-NLS-1$
                     .put("outputPath", outputPath) //$NON-NLS-1$
+                    .put("detectedKind", detectedKind) //$NON-NLS-1$
                     .put("discoveredApi", serviceClass.getName()) //$NON-NLS-1$
                     .put("methodSignature", exportMethod.toString()) //$NON-NLS-1$
                     .put("elapsedMs", elapsed) //$NON-NLS-1$
@@ -196,6 +288,222 @@ public class ExportObjectTool implements IMcpTool
                 // best-effort cleanup
             }
         }
+    }
+
+    /**
+     * 1.41: poll a previously-issued runKey. Returns the cached result (and
+     * removes the entry) or a fresh Pending JSON.
+     */
+    private String resumePending(String runKey, Map<String, String> params)
+    {
+        PendingExportRegistry registry = PendingExportRegistry.getInstance();
+        registry.pruneExpired();
+        PendingExportRegistry.PendingEntry entry = registry.get(runKey);
+        if (entry == null)
+        {
+            return ToolResult.error("runKey not found - the export either completed " //$NON-NLS-1$
+                + "and was already retrieved, or was abandoned and evicted by TTL. " //$NON-NLS-1$
+                + "Issue a new request without runKey to start over.") //$NON-NLS-1$
+                .put("operation", NAME) //$NON-NLS-1$
+                .put("runKey", runKey) //$NON-NLS-1$
+                .toJson();
+        }
+        long timeoutMs = parseTimeoutMs(params, DEFAULT_TIMEOUT_MS);
+        String result = entry.await(timeoutMs);
+        if (result != null)
+        {
+            registry.remove(runKey);
+            return result;
+        }
+        return buildPendingJson(runKey, entry, null, null, null, timeoutMs);
+    }
+
+    private long parseTimeoutMs(Map<String, String> params, long defaultMs)
+    {
+        String t = JsonUtils.extractStringArgument(params, "timeoutSeconds"); //$NON-NLS-1$
+        if (t == null || t.isEmpty())
+        {
+            return defaultMs;
+        }
+        try
+        {
+            int seconds = (int) Double.parseDouble(t);
+            seconds = Math.max(MIN_TIMEOUT_SECONDS, Math.min(seconds, MAX_TIMEOUT_SECONDS));
+            return seconds * 1000L;
+        }
+        catch (NumberFormatException e)
+        {
+            return defaultMs;
+        }
+    }
+
+    private String buildPendingJson(String runKey, PendingExportRegistry.PendingEntry entry,
+        String projectName, String outputPath, String detectedKind, long timeoutMs)
+    {
+        ToolResult tr = ToolResult.success()
+            .put("operation", NAME) //$NON-NLS-1$
+            .put("status", "Pending") //$NON-NLS-1$ //$NON-NLS-2$
+            .put("runKey", runKey) //$NON-NLS-1$
+            .put("elapsedMs", entry.elapsedMs()) //$NON-NLS-1$
+            .put("waitedMs", timeoutMs) //$NON-NLS-1$
+            .put("hint", "Export still running. Call this tool again with runKey=\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + runKey + "\" to resume waiting (or with the same params - they " //$NON-NLS-1$
+                + "produce the same runKey)."); //$NON-NLS-1$
+        if (projectName != null)
+        {
+            tr.put("projectName", projectName); //$NON-NLS-1$
+        }
+        if (outputPath != null)
+        {
+            tr.put("outputPath", outputPath); //$NON-NLS-1$
+        }
+        if (detectedKind != null)
+        {
+            tr.put("detectedKind", detectedKind); //$NON-NLS-1$
+        }
+        return tr.toJson();
+    }
+
+    /**
+     * 1.41: holder for kind/extension resolution result.
+     */
+    private static final class KindResolution
+    {
+        String kindLabel;        // "ExternalDataProcessor" / "ExternalReport"
+        String normalizedPath;   // outputPath with proper extension
+        String error;
+        String requestedExtension;
+        String detectedFromNature;
+
+        Map<String, Object> diagnosticTag()
+        {
+            Map<String, Object> m = new LinkedHashMap<>();
+            if (requestedExtension != null)
+            {
+                m.put("requestedExtension", requestedExtension); //$NON-NLS-1$
+            }
+            if (detectedFromNature != null)
+            {
+                m.put("detectedFromNature", detectedFromNature); //$NON-NLS-1$
+            }
+            if (kindLabel != null)
+            {
+                m.put("expectedExtension", kindLabel.equals("ExternalReport") //$NON-NLS-1$ //$NON-NLS-2$
+                    ? ".erf" : ".epf"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            return m;
+        }
+    }
+
+    /**
+     * 1.41: resolve the export kind from the requested {@code outputPath}
+     * extension (.epf or .erf) or, when missing, from the project nature.
+     * Validates that the requested extension matches the detected kind.
+     */
+    private KindResolution resolveKind(IProject project, String outputPathRaw)
+    {
+        KindResolution kr = new KindResolution();
+        String lower = outputPathRaw.toLowerCase();
+        String detectedFromNature = detectKindFromNatures(project);
+        kr.detectedFromNature = detectedFromNature;
+
+        boolean hasEpf = lower.endsWith(".epf"); //$NON-NLS-1$
+        boolean hasErf = lower.endsWith(".erf"); //$NON-NLS-1$
+
+        if (hasEpf || hasErf)
+        {
+            kr.requestedExtension = hasEpf ? ".epf" : ".erf"; //$NON-NLS-1$ //$NON-NLS-2$
+            kr.kindLabel = hasEpf ? "ExternalDataProcessor" : "ExternalReport"; //$NON-NLS-1$ //$NON-NLS-2$
+            kr.normalizedPath = outputPathRaw;
+            // If we detected a project nature, validate it matches.
+            if (detectedFromNature != null && !detectedFromNature.equals(kr.kindLabel))
+            {
+                kr.error = "kindMismatch: outputPath has extension " //$NON-NLS-1$
+                    + kr.requestedExtension + " but project '" //$NON-NLS-1$
+                    + project.getName() + "' looks like " //$NON-NLS-1$
+                    + detectedFromNature + " (use ." //$NON-NLS-1$
+                    + (detectedFromNature.equals("ExternalReport") ? "erf" : "epf") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " instead)"; //$NON-NLS-1$
+            }
+            return kr;
+        }
+
+        // 1.41: refuse paths whose filename already carries a non-.epf/.erf
+        // extension, otherwise the auto-append below would silently produce
+        // garbage like "y.txt.epf".
+        int slash = Math.max(outputPathRaw.lastIndexOf('/'), outputPathRaw.lastIndexOf('\\'));
+        String fileNamePart = slash >= 0 ? outputPathRaw.substring(slash + 1) : outputPathRaw;
+        int dot = fileNamePart.lastIndexOf('.');
+        if (dot > 0 && dot < fileNamePart.length() - 1)
+        {
+            String unknownExt = fileNamePart.substring(dot);
+            kr.requestedExtension = unknownExt;
+            kr.error = "Unsupported outputPath extension '" + unknownExt //$NON-NLS-1$
+                + "'. Use .epf for ExternalDataProcessor or .erf for ExternalReport, " //$NON-NLS-1$
+                + "or a path without an extension (auto-appended from project nature)."; //$NON-NLS-1$
+            return kr;
+        }
+
+        // No extension: use detected kind to append it.
+        if (detectedFromNature != null)
+        {
+            kr.kindLabel = detectedFromNature;
+            kr.normalizedPath = outputPathRaw
+                + (detectedFromNature.equals("ExternalReport") ? ".erf" : ".epf"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return kr;
+        }
+
+        kr.error = "Cannot determine export kind: outputPath has no .epf/.erf extension " //$NON-NLS-1$
+            + "and the project nature did not reveal an ExternalDataProcessor / " //$NON-NLS-1$
+            + "ExternalReport. Pass an outputPath with the proper extension."; //$NON-NLS-1$
+        return kr;
+    }
+
+    /**
+     * Probe project natures for {@code ExternalDataProcessor} or
+     * {@code ExternalReport}. Returns the kind label or {@code null} when
+     * the project is a regular configuration / extension / unknown.
+     */
+    private String detectKindFromNatures(IProject project)
+    {
+        try
+        {
+            String[] natures = project.getDescription().getNatureIds();
+            for (String n : natures)
+            {
+                String lc = n.toLowerCase();
+                // Order matters: test the longer/more specific substring first
+                // to avoid false positives from a nature ID that happens to
+                // contain "externalreport" as a sub-substring.
+                if (lc.contains("externaldataprocessor")) //$NON-NLS-1$
+                {
+                    return "ExternalDataProcessor"; //$NON-NLS-1$
+                }
+                if (lc.contains("externalreport")) //$NON-NLS-1$
+                {
+                    return "ExternalReport"; //$NON-NLS-1$
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+            // project closed or in transient state - fall through to null
+        }
+        return null;
+    }
+
+    /**
+     * 1.41: best-effort FQN for {@link BmExportHelper#forceExportAndWait}.
+     * External processors / reports use kind-prefixed FQNs in EDT BM
+     * (e.g. {@code ExternalDataProcessor.MyTool}).
+     */
+    private String inferFqnForKind(String kindLabel, String objectName)
+    {
+        if (kindLabel == null || objectName == null || objectName.isEmpty())
+        {
+            return null;
+        }
+        return kindLabel + "." + objectName; //$NON-NLS-1$
     }
 
     private Method findExportMethod(Class<?> serviceClass)
@@ -256,6 +564,9 @@ public class ExportObjectTool implements IMcpTool
     {
         long elapsed = System.currentTimeMillis() - start;
         Map<String, Object> tag = new LinkedHashMap<>();
+        // 1.41: unified under exportApiNotFound with phase=invocation so AI
+        // clients can branch on a single tag name (probe vs invocation).
+        tag.put("phase", "invocation"); //$NON-NLS-1$ //$NON-NLS-2$
         tag.put("discoveredApi", serviceClass.getName()); //$NON-NLS-1$
         tag.put("methodHints", describeMethods(serviceClass)); //$NON-NLS-1$
         tag.put("reason", reason); //$NON-NLS-1$
@@ -263,11 +574,11 @@ public class ExportObjectTool implements IMcpTool
             "Open the project in EDT and use File -> Export -> " //$NON-NLS-1$
                 + "'External data processor / report' as a workaround."); //$NON-NLS-1$
         return ToolResult.error("Export failed: " + reason) //$NON-NLS-1$
-            .put("operation", "export_object") //$NON-NLS-1$ //$NON-NLS-2$
+            .put("operation", NAME) //$NON-NLS-1$
             .put("projectName", projectName) //$NON-NLS-1$
             .put("outputPath", outputPath) //$NON-NLS-1$
             .put("elapsedMs", elapsed) //$NON-NLS-1$
-            .put("exportServiceNotFound", tag) //$NON-NLS-1$
+            .put("exportApiNotFound", tag) //$NON-NLS-1$
             .toJson();
     }
 
@@ -328,14 +639,21 @@ public class ExportObjectTool implements IMcpTool
             }
             candidates.append(EXPORT_SERVICE_CANDIDATES[i]);
         }
+        java.util.List<String> tried = java.util.Arrays.asList(EXPORT_SERVICE_CANDIDATES);
+        Map<String, Object> tag = new LinkedHashMap<>();
+        tag.put("phase", "probe"); //$NON-NLS-1$ //$NON-NLS-2$
+        tag.put("triedServices", tried); //$NON-NLS-1$
+        tag.put("hint", //$NON-NLS-1$
+            "Open the project in EDT and use File -> Export -> " //$NON-NLS-1$
+                + "'External data processor / report' as a workaround."); //$NON-NLS-1$
         return ToolResult.error(
             "EDT export API not available in this EDT version. " //$NON-NLS-1$
-                + "Probed: " + candidates + ". " //$NON-NLS-1$ //$NON-NLS-2$
-                + "Workaround: open the project in EDT and use " //$NON-NLS-1$
-                + "File -> Export -> 'External data processor / report'. " //$NON-NLS-1$
-                + "Alternatively, request a binary build via the EDT GUI - " //$NON-NLS-1$
-                + "the underlying API will be wired into export_object once the " //$NON-NLS-1$
-                + "package is exposed (planned for the 1.40 release)." //$NON-NLS-1$
-        ).toJson();
+                + "Probed " + EXPORT_SERVICE_CANDIDATES.length + " candidate services: " //$NON-NLS-1$ //$NON-NLS-2$
+                + candidates + ". Use the EDT GUI fallback: " //$NON-NLS-1$
+                + "File -> Export -> 'External data processor / report'." //$NON-NLS-1$
+        )
+            .put("operation", NAME) //$NON-NLS-1$
+            .put("exportApiNotFound", tag) //$NON-NLS-1$
+            .toJson();
     }
 }
