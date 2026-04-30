@@ -10,11 +10,13 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.ditrix.edt.mcp.server.Activator;
@@ -55,7 +57,7 @@ public final class PendingReferencesRegistry
 
     private final ConcurrentHashMap<String, PendingEntry> entries = new ConcurrentHashMap<>();
 
-    private final ExecutorService executor = Executors.newCachedThreadPool(new ThreadFactory()
+    private final ThreadFactory threadFactory = new ThreadFactory()
     {
         private final AtomicLong counter = new AtomicLong(0);
 
@@ -67,7 +69,26 @@ public final class PendingReferencesRegistry
             t.setPriority(Thread.NORM_PRIORITY - 1);
             return t;
         }
-    });
+    };
+
+    /**
+     * 1.41: bounded executor (corePoolSize=2, maxPoolSize=8, queue=20)
+     * with {@link ThreadPoolExecutor.CallerRunsPolicy} - backpressure when the
+     * queue saturates instead of unbounded thread growth from
+     * {@code newCachedThreadPool}. Sized for typical EDT desktop workloads
+     * (parallel MCP calls from one or two AI clients).
+     *
+     * <p>Note: CallerRunsPolicy blocks the calling MCP HTTP-handler thread
+     * (from McpServer.mainExecutor). Acceptable for the target audience of
+     * 1-2 concurrent AI clients; under load tests of 100+ overflow tasks
+     * the HTTP server can saturate.
+     */
+    private final ExecutorService executor = new ThreadPoolExecutor(
+        2, 8,
+        60L, TimeUnit.SECONDS,
+        new ArrayBlockingQueue<>(20),
+        threadFactory,
+        new ThreadPoolExecutor.CallerRunsPolicy());
 
     private PendingReferencesRegistry()
     {

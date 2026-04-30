@@ -109,8 +109,9 @@ public class FindReferencesTool implements IMcpTool
                 + "(BSL code). Default: empty = all enabled.")
             .stringProperty("timeoutSeconds", //$NON-NLS-1$
                 "1.40.x: Soft timeout in seconds before returning Pending JSON "
-                + "with a runKey. Default: 30. Calling again with the same "
-                + "params resumes waiting (no duplicate work).")
+                + "with a runKey. Default: 30. Range: 5-120 (values outside are "
+                + "clamped). Calling again with the same params resumes waiting "
+                + "(no duplicate work).")
             .stringProperty("runKey", //$NON-NLS-1$
                 "1.40.x: Resume polling a previously-issued search. Pass the "
                 + "runKey returned by an earlier Pending response; other "
@@ -189,7 +190,7 @@ public class FindReferencesTool implements IMcpTool
         String runKey = PendingReferencesRegistry.computeRunKey(projectName, objectFqn,
             categoriesCsv, skipBsl, bslOnly, limit, deep);
 
-        long timeoutMs = parseTimeoutMs(params, 30_000L);
+        long timeoutMs = parseTimeoutMs(params, DEFAULT_TIMEOUT_MS);
 
         final int maxResults = limit;
         final boolean deepFinal = deep;
@@ -229,7 +230,7 @@ public class FindReferencesTool implements IMcpTool
                 .put("runKey", runKey)
                 .toJson();
         }
-        long timeoutMs = parseTimeoutMs(params, 30_000L);
+        long timeoutMs = parseTimeoutMs(params, DEFAULT_TIMEOUT_MS);
         String result = entry.await(timeoutMs);
         if (result != null)
         {
@@ -238,6 +239,11 @@ public class FindReferencesTool implements IMcpTool
         }
         return buildPendingJson(runKey, entry, null, null, null, timeoutMs);
     }
+
+    /** 1.41: clamp range for timeoutSeconds to keep MCP HTTP roundtrips sane. */
+    private static final int MIN_TIMEOUT_SECONDS = 5;
+    private static final int MAX_TIMEOUT_SECONDS = 120;
+    private static final long DEFAULT_TIMEOUT_MS = 30_000L;
 
     private long parseTimeoutMs(Map<String, String> params, long defaultMs)
     {
@@ -248,8 +254,9 @@ public class FindReferencesTool implements IMcpTool
         }
         try
         {
-            int seconds = Math.max(1, (int) Double.parseDouble(t));
-            return Math.min(seconds * 1000L, 5 * 60_000L); // hard cap 5 min
+            int seconds = (int) Double.parseDouble(t);
+            seconds = Math.max(MIN_TIMEOUT_SECONDS, Math.min(seconds, MAX_TIMEOUT_SECONDS));
+            return seconds * 1000L;
         }
         catch (NumberFormatException e)
         {
